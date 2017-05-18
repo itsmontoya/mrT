@@ -21,9 +21,12 @@ func New(dir, name string) (mp *MapDB, err error) {
 
 	// Encryption middleware
 	cmw := middleware.NewCryptyMW([]byte("         encryption key         "), make([]byte, 16))
+	if cmw == nil {
+
+	}
 
 	// Create a new instance of mrT
-	if m.mrT, err = mrT.New(dir, name, cmw); err != nil {
+	if m.mrT, err = mrT.New(dir, name); err != nil {
 		return
 	}
 
@@ -149,6 +152,22 @@ func (m *MapDB) ForEach(fn ForEachFn) (ended bool) {
 	return
 }
 
+// Txn will begin a new transaction
+func (m *MapDB) Txn(fn func(*Txn) error) (err error) {
+	var txn Txn
+	m.mux.Lock()
+	defer m.mux.Unlock()
+
+	return m.mrT.Txn(func(t *mrT.Txn) (err error) {
+		txn.txn = t
+		txn.m = m.m
+		err = fn(&txn)
+		txn.txn = nil
+		txn.m = nil
+		return
+	})
+}
+
 // Close will close map db
 func (m *MapDB) Close() (err error) {
 	m.mux.Lock()
@@ -173,3 +192,45 @@ func (m *MapDB) Close() (err error) {
 
 // ForEachFn is used for iterating over map db items
 type ForEachFn func(key, value string) (end bool)
+
+// Txn is a MapDB transaction
+type Txn struct {
+	txn *mrT.Txn
+	m   map[string]string
+}
+
+// Get will get a value
+func (t *Txn) Get(key string) (value string, err error) {
+	var ok bool
+	if value, ok = t.m[key]; !ok {
+		err = ErrKeyDoesNotExist
+		return
+	}
+
+	return
+}
+
+// Put will put a value
+func (t *Txn) Put(key, value string) (err error) {
+	if err = t.txn.Put([]byte(key), []byte(value)); err != nil {
+		return
+	}
+
+	t.m[key] = value
+	return
+}
+
+// Delete will delete a value
+func (t *Txn) Delete(key string) (err error) {
+	var ok bool
+	if _, ok = t.m[key]; !ok {
+		return ErrKeyDoesNotExist
+	}
+
+	if err = t.txn.Delete([]byte(key)); err != nil {
+		return
+	}
+
+	delete(t.m, key)
+	return
+}

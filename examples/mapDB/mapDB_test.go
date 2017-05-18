@@ -62,7 +62,9 @@ func TestMapDB(t *testing.T) {
 		t.Fatalf("invalid entry count, expected %d and received %d", 2, entryCnt)
 	}
 
-	if err = m.Put("results", "none"); err != nil {
+	if err = m.Txn(func(txn *Txn) (err error) {
+		return txn.Put("results", "none")
+	}); err != nil {
 		t.Fatal(err)
 	}
 
