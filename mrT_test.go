@@ -1,7 +1,6 @@
 package mrT
 
 import (
-	//"fmt"
 	"testing"
 )
 
@@ -15,49 +14,69 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = m.Commit(func(fn WriteFn) (err error) {
-		fn([]byte("hello"))
-		fn([]byte("world"))
+	if err = m.Txn(func(txn *Txn) (err error) {
+		txn.Put([]byte("greeting"), []byte("hello"))
+		txn.Put([]byte("name"), []byte("world"))
 		return
 	}); err != nil {
 		return
 	}
 
-	if err = m.Commit(func(fn WriteFn) (err error) {
-		fn([]byte("hello"))
-		fn([]byte("world"))
+	if err = m.Txn(func(txn *Txn) (err error) {
+		txn.Put([]byte("name"), []byte("John Doe"))
 		return
 	}); err != nil {
 		return
 	}
 
 	var entryCount int
-	m.ForEach(func(cid string, data []byte) (end bool) {
+	m.ForEach(func(lineType byte, key []byte, value []byte) (end bool) {
 		entryCount++
 		return
 	})
 
-	if entryCount != 4 {
+	if entryCount != 3 {
 		t.Fatalf("invalid entry count, expected %d and received %d", 4, entryCount)
 	}
 
-	m.Archive(func(fn WriteFn) (err error) {
-		fn([]byte("hello"))
-		fn([]byte("world :)"))
+	entryCount = 0
+	m.ForEachTxn(func(ti *TxnInfo) (end bool) {
+		switch entryCount {
+		case 0:
+			if len(ti.Actions) != 2 {
+				t.Fatalf("invalid number of actions, expected %d and received %d", 2, len(ti.Actions))
+			}
+
+		case 1:
+			if len(ti.Actions) != 1 {
+				t.Fatalf("invalid number of actions, expected %d and received %d", 1, len(ti.Actions))
+			}
+
+		default:
+			t.Fatal("invalid number of transaction entries")
+			return true
+		}
+
+		entryCount++
 		return
 	})
 
-	if err = m.Commit(func(fn WriteFn) (err error) {
-		fn([]byte("derp"))
+	m.Archive(func(txn *Txn) (err error) {
+		txn.Put([]byte("greeting"), []byte("hello"))
+		txn.Put([]byte("name"), []byte("world :)"))
+		return
+	})
+
+	if err = m.Txn(func(txn *Txn) (err error) {
+		txn.Put([]byte("name"), []byte("derp"))
 		return
 	}); err != nil {
 		return
 	}
 
-	m.Archive(func(fn WriteFn) (err error) {
-		fn([]byte("hello"))
-		fn([]byte("world :)"))
-		fn([]byte("derp"))
+	m.Archive(func(txn *Txn) (err error) {
+		txn.Put([]byte("greeting"), []byte("hello"))
+		txn.Put([]byte("name"), []byte("derp"))
 		return
 	})
 
