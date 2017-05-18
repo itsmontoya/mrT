@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"io/ioutil"
 	"os"
 	"path"
 	"sync"
 
 	"github.com/itsmontoya/async/file"
+	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
 	"github.com/missionMeteora/journaler"
 	"github.com/missionMeteora/toolkit/errors"
@@ -34,8 +36,12 @@ const (
 	ErrInvalidLine = errors.Error("invalid line")
 )
 
+var (
+	newlineBytes = []byte{'\n'}
+)
+
 // New will return a new instance of MrT
-func New(dir, name string) (mp *MrT, err error) {
+func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	var mrT MrT
 	// Make the dirs needed for file
 	if err = os.MkdirAll(dir, 0755); err != nil {
@@ -52,6 +58,10 @@ func New(dir, name string) (mp *MrT, err error) {
 	mrT.ug = uuid.NewGen()
 	mrT.buf = bytes.NewBuffer(nil)
 	mrT.s = seeker.New(mrT.f)
+
+	if len(mws) > 0 {
+		mrT.mw = middleware.NewMWs(mws...)
+	}
 
 	if err = mrT.s.SeekToEnd(); err != nil {
 		return
@@ -74,6 +84,7 @@ type MrT struct {
 	f  *file.File
 	s  *seeker.Seeker
 	ug *uuid.Gen
+	mw *middleware.MWs
 
 	buf  *bytes.Buffer
 	nbuf [8]byte
@@ -81,21 +92,33 @@ type MrT struct {
 	closed bool
 }
 
-func (m *MrT) writeData(key, value []byte) {
-	m.writeLine(PutLine, key, value)
-}
-
-func (m *MrT) writeBytes(b []byte) {
+func (m *MrT) writeBytes(w io.Writer, b []byte) {
 	binary.LittleEndian.PutUint64(m.nbuf[:], uint64(len(b)))
-	m.buf.Write(m.nbuf[:])
-	m.buf.Write(b)
+	w.Write(m.nbuf[:])
+	w.Write(b)
 }
 
-func (m *MrT) writeLine(lineType byte, key, value []byte) {
+func (m *MrT) writeLine(lineType byte, key, value []byte) (err error) {
+	var w io.Writer
+	switch lineType {
+	case PutLine, DeleteLine:
+		if m.mw == nil {
+			w = m.buf
+		} else {
+			if w, err = m.mw.Writer(m.buf); err != nil {
+				return
+			}
+		}
+
+	default:
+		w = m.buf
+	}
+
 	m.buf.WriteByte(lineType)
-	m.writeBytes(key)
-	m.writeBytes(value)
+	m.writeBytes(w, key)
+	m.writeBytes(w, value)
 	m.buf.WriteByte('\n')
+	return
 }
 
 func (m *MrT) flush() (err error) {
@@ -126,7 +149,9 @@ func (m *MrT) Txn(fn TxnFn) (err error) {
 	txn.writeLine = m.writeLine
 	defer txn.clear()
 
-	m.writeLine(TransactionLine, m.newCommitID(), nil)
+	if err = m.writeLine(TransactionLine, m.newCommitID(), nil); err != nil {
+		return
+	}
 
 	if err = fn(&txn); err != nil {
 		m.rollback()
@@ -142,7 +167,9 @@ func (m *MrT) Comment(b []byte) (err error) {
 	defer m.mux.Unlock()
 
 	// Write the comment line
-	m.writeLine(CommentLine, b, nil)
+	if err = m.writeLine(CommentLine, b, nil); err != nil {
+		return
+	}
 
 	return m.flush()
 }
@@ -159,17 +186,35 @@ func (m *MrT) ForEach(fn ForEachFn) (err error) {
 	defer m.s.SeekToEnd()
 
 	return m.s.ReadLines(func(buf *bytes.Buffer) (end bool) {
-		b := buf.Bytes()
-		switch b[0] {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return true
+		}
+
+		switch lineType {
 		case TransactionLine, CommentLine:
 		case PutLine, DeleteLine:
+			var b []byte
+			if m.mw != nil {
+				var r io.Reader
+				if r, err = m.mw.Reader(buf); err != nil {
+					return true
+				}
+
+				if b, err = ioutil.ReadAll(r); err != nil {
+					return true
+				}
+			} else {
+				b = buf.Bytes()
+			}
+
 			if m.cor {
 				key, value = getKVSafe(b)
 			} else {
 				key, value = getKV(b)
 			}
 
-			return fn(b[0], key, value)
+			return fn(lineType, key, value)
 
 		default:
 			err = ErrInvalidLine
@@ -178,46 +223,6 @@ func (m *MrT) ForEach(fn ForEachFn) (err error) {
 
 		return
 	})
-}
-
-// Close will close MrT
-func (m *MrT) Close() (err error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
-		return errors.ErrIsClosed
-	}
-
-	m.closed = true
-	m.buf = nil
-	m.s = nil
-	m.ug = nil
-	return m.f.Close()
-}
-
-// TxnInfo is information about a transaction
-type TxnInfo struct {
-	// Transaction id
-	ID string `json:"id"`
-	// Timestamp of transaction
-	TS int64 `json:"ts"`
-	// List of actions
-	Actions []*ActionInfo `json:"actions"`
-}
-
-func newActionInfo(put bool, key, value []byte) *ActionInfo {
-	var a ActionInfo
-	a.Put = put
-	a.Key = string(key)
-	a.Value = string(value)
-	return &a
-}
-
-// ActionInfo is information about an action
-type ActionInfo struct {
-	Put   bool   `json:"put"`
-	Key   string `json:"key"`
-	Value string `json:"value"`
 }
 
 // ForEachTxn will iterate through all the file transactions
@@ -238,9 +243,13 @@ func (m *MrT) ForEachTxn(fn ForEachTxnFn) (err error) {
 	defer m.s.SeekToEnd()
 
 	if err = m.s.ReadLines(func(buf *bytes.Buffer) (end bool) {
-		b := buf.Bytes()
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return true
+		}
+
 		// Switch on the first byte (line indicator)
-		switch b[0] {
+		switch lineType {
 		case TransactionLine:
 			if ti != nil {
 				// A transaction item already exists, let's pass it to the func!
@@ -248,7 +257,7 @@ func (m *MrT) ForEachTxn(fn ForEachTxnFn) (err error) {
 			}
 
 			// Extract transaction id from the key
-			txnID, _ = getKV(b)
+			txnID, _ = getKV(buf.Bytes())
 
 			// Parse uuid from transaction id
 			tu, err := uuid.ParseStr(string(txnID))
@@ -270,8 +279,22 @@ func (m *MrT) ForEachTxn(fn ForEachTxnFn) (err error) {
 				return
 			}
 
+			var b []byte
+			if m.mw != nil {
+				var r io.Reader
+				if r, err = m.mw.Reader(buf); err != nil {
+					return true
+				}
+
+				if b, err = ioutil.ReadAll(r); err != nil {
+					return true
+				}
+			} else {
+				b = buf.Bytes()
+			}
+
 			key, value = getKV(b)
-			ti.Actions = append(ti.Actions, newActionInfo(b[0] == PutLine, key, value))
+			ti.Actions = append(ti.Actions, newActionInfo(lineType == PutLine, key, value))
 
 		default:
 			err = ErrInvalidLine
@@ -343,6 +366,21 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	return m.flush()
 }
 
+// Close will close MrT
+func (m *MrT) Close() (err error) {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
+
+	m.closed = true
+	m.buf = nil
+	m.s = nil
+	m.ug = nil
+	return m.f.Close()
+}
+
 // ForEachFn is used for iterating through entries
 type ForEachFn func(lineType byte, key, value []byte) (end bool)
 
@@ -352,17 +390,41 @@ type ForEachTxnFn func(ti *TxnInfo) (end bool)
 // TxnFn is used for transactions
 type TxnFn func(txn *Txn) error
 
+// TxnInfo is information about a transaction
+type TxnInfo struct {
+	// Transaction id
+	ID string `json:"id"`
+	// Timestamp of transaction
+	TS int64 `json:"ts"`
+	// List of actions
+	Actions []*ActionInfo `json:"actions"`
+}
+
+func newActionInfo(put bool, key, value []byte) *ActionInfo {
+	var a ActionInfo
+	a.Put = put
+	a.Key = string(key)
+	a.Value = string(value)
+	return &a
+}
+
+// ActionInfo is information about an action
+type ActionInfo struct {
+	Put   bool   `json:"put"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 func getFirstCommit(buf *bytes.Buffer) (end bool) {
 	return buf.Bytes()[0] == TransactionLine
 }
 
 // getKV will extract the key and value from a payload
-// Note: Will ignore the first byte as it's the line-type indicator. Feel free to pass the entire payload
 func getKV(b []byte) (key, value []byte) {
-	// Set index at 9 to accommodate 1 byte for line type and 8 bytes for key length
-	idx := uint64(9)
+	// Set index at 8 to accommodate 8 bytes for key length
+	idx := uint64(8)
 	// Get key length
-	lv := binary.LittleEndian.Uint64(b[1:idx])
+	lv := binary.LittleEndian.Uint64(b[0:idx])
 	key = b[idx : lv+idx]
 
 	// Increment index past our key bytes
