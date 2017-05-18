@@ -37,7 +37,12 @@ const (
 // New will return a new instance of MrT
 func New(dir, name string) (mp *MrT, err error) {
 	var mrT MrT
-	if mrT.f, err = file.Create(path.Join(dir, name+".tdb")); err != nil {
+	// Make the dirs needed for file
+	if err = os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+
+	if mrT.f, err = file.OpenFile(path.Join(dir, name+".tdb"), os.O_RDWR|os.O_CREATE, 0644); err != nil {
 		return
 	}
 
@@ -47,6 +52,11 @@ func New(dir, name string) (mp *MrT, err error) {
 	mrT.ug = uuid.NewGen()
 	mrT.buf = bytes.NewBuffer(nil)
 	mrT.s = seeker.New(mrT.f)
+
+	if err = mrT.s.SeekToEnd(); err != nil {
+		return
+	}
+
 	mp = &mrT
 	return
 }
@@ -67,6 +77,8 @@ type MrT struct {
 
 	buf  *bytes.Buffer
 	nbuf [8]byte
+
+	closed bool
 }
 
 func (m *MrT) writeData(key, value []byte) {
@@ -157,7 +169,7 @@ func (m *MrT) ForEach(fn ForEachFn) (err error) {
 				key, value = getKV(b)
 			}
 
-			return fn(PutLine, key, value)
+			return fn(b[0], key, value)
 
 		default:
 			err = ErrInvalidLine
@@ -166,6 +178,21 @@ func (m *MrT) ForEach(fn ForEachFn) (err error) {
 
 		return
 	})
+}
+
+// Close will close MrT
+func (m *MrT) Close() (err error) {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
+
+	m.closed = true
+	m.buf = nil
+	m.s = nil
+	m.ug = nil
+	return m.f.Close()
 }
 
 // TxnInfo is information about a transaction
