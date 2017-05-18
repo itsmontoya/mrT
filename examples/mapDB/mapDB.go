@@ -139,6 +139,14 @@ func (m *MapDB) Close() (err error) {
 		return
 	}
 
+	m.mrT.Archive(func(txn *mrT.Txn) (err error) {
+		for key, value := range m.m {
+			txn.Put([]byte(key), []byte(value))
+		}
+
+		return
+	})
+
 	err = m.mrT.Close()
 
 	m.closed = true
