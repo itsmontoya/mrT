@@ -3,7 +3,7 @@ package mrT
 // Txn is a transaction for persistence actions
 type Txn struct {
 	// write func
-	writeLine func(lineType byte, key, value []byte)
+	writeLine func(lineType byte, key, value []byte) error
 }
 
 func (t *Txn) clear() {
@@ -13,11 +13,11 @@ func (t *Txn) clear() {
 }
 
 // Put will set a value
-func (t *Txn) Put(key, value []byte) {
-	t.writeLine(PutLine, key, value)
+func (t *Txn) Put(key, value []byte) error {
+	return t.writeLine(PutLine, key, value)
 }
 
 // Delete will remove a value
-func (t *Txn) Delete(key []byte) {
-	t.writeLine(DeleteLine, key, nil)
+func (t *Txn) Delete(key []byte) error {
+	return t.writeLine(DeleteLine, key, nil)
 }
