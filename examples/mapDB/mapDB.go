@@ -3,6 +3,7 @@ package mapDB
 import (
 	"sync"
 
+	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/mrT"
 	"github.com/missionMeteora/toolkit/errors"
 )
@@ -17,21 +18,18 @@ func New(dir, name string) (mp *MapDB, err error) {
 	var m MapDB
 	// Initialize map
 	m.m = make(map[string]string)
+
+	// Encryption middleware
+	cmw := middleware.NewCryptyMW([]byte("         encryption key         "), make([]byte, 16))
+
 	// Create a new instance of mrT
-	if m.mrT, err = mrT.New(dir, name); err != nil {
+	if m.mrT, err = mrT.New(dir, name, cmw); err != nil {
 		return
 	}
 
-	m.mrT.ForEach(func(lineType byte, key, value []byte) (end bool) {
-		switch lineType {
-		case mrT.PutLine:
-			m.m[string(key)] = string(value)
-		case mrT.DeleteLine:
-			delete(m.m, string(key))
-		}
-
+	if err = m.mrT.ForEach(m.load); err != nil {
 		return
-	})
+	}
 
 	// Assign pointer to our MapDB
 	mp = &m
@@ -48,6 +46,27 @@ type MapDB struct {
 	mrT *mrT.MrT
 	// Closed state
 	closed bool
+}
+
+func (m *MapDB) load(lineType byte, key, value []byte) (end bool) {
+	switch lineType {
+	case mrT.PutLine:
+		m.m[string(key)] = string(value)
+	case mrT.DeleteLine:
+		delete(m.m, string(key))
+	}
+
+	return
+}
+
+func (m *MapDB) populate(txn *mrT.Txn) (err error) {
+	for key, value := range m.m {
+		if err = txn.Put([]byte(key), []byte(value)); err != nil {
+			return
+		}
+	}
+
+	return
 }
 
 // Get will retrieve a value from the DB
@@ -134,25 +153,22 @@ func (m *MapDB) ForEach(fn ForEachFn) (ended bool) {
 func (m *MapDB) Close() (err error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
+
 	if m.closed {
 		err = errors.ErrIsClosed
 		return
 	}
 
-	m.mrT.Archive(func(txn *mrT.Txn) (err error) {
-		for key, value := range m.m {
-			txn.Put([]byte(key), []byte(value))
-		}
+	var errs errors.ErrorList
+	errs.Push(m.mrT.Archive(m.populate))
 
-		return
-	})
-
-	err = m.mrT.Close()
-
+	// Close underlying Mr.T
+	errs.Push(m.mrT.Close())
+	// Zero-out map db values
 	m.closed = true
 	m.m = nil
 	m.mrT = nil
-	return
+	return errs.Err()
 }
 
 // ForEachFn is used for iterating over map db items
