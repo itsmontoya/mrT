@@ -7,4 +7,5 @@ Mr.T (Mr. Transaction) is a database persistence layer. The goal of this library
 **To support multi-level maps, please use concatinated strings to represent buckets*
 
 ## Usage
-For usage examples, please see the examples directory
+For usage examples, please see the examples directory OR see direct links below:
+- [MapDB](https://github.com/itsmontoya/mrT/tree/master/examples/mapDB)
