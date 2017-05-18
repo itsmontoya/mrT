@@ -359,7 +359,7 @@ func getFirstCommit(buf *bytes.Buffer) (end bool) {
 // getKV will extract the key and value from a payload
 // Note: Will ignore the first byte as it's the line-type indicator. Feel free to pass the entire payload
 func getKV(b []byte) (key, value []byte) {
-	// Set index at 9 to accomodate 1 byte for line type and 8 bytes for key length
+	// Set index at 9 to accommodate 1 byte for line type and 8 bytes for key length
 	idx := uint64(9)
 	// Get key length
 	lv := binary.LittleEndian.Uint64(b[1:idx])
