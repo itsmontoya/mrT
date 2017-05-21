@@ -44,7 +44,7 @@ var (
 func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	var mrT MrT
 	// Make the dirs needed for file
-	if err = os.MkdirAll(dir, 0755); err != nil {
+	if err = os.MkdirAll(path.Join(dir, "archive"), 0755); err != nil {
 		return
 	}
 
@@ -55,13 +55,14 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	mrT.dir = dir
 	mrT.name = name
 
+	// Create new uuid generator
 	mrT.ug = uuid.NewGen()
+	// Create new write buffer
 	mrT.buf = bytes.NewBuffer(nil)
+	// Create new seeker
 	mrT.s = seeker.New(mrT.f)
-
-	if len(mws) > 0 {
-		mrT.mw = middleware.NewMWs(mws...)
-	}
+	// Set Mr.T's middleware
+	mrT.setMWs(mws)
 
 	if err = mrT.s.SeekToEnd(); err != nil {
 		return
@@ -92,32 +93,75 @@ type MrT struct {
 	closed bool
 }
 
-func (m *MrT) writeBytes(w io.Writer, b []byte) {
-	binary.LittleEndian.PutUint64(m.nbuf[:], uint64(len(b)))
-	w.Write(m.nbuf[:])
-	w.Write(b)
+func (m *MrT) setMWs(mws []middleware.Middleware) {
+	if len(mws) == 0 {
+		return
+	}
+
+	m.mw = middleware.NewMWs(mws...)
+	return
+}
+
+func (m *MrT) isMWWrite(lineType byte) bool {
+	if m.mw == nil {
+		return false
+	}
+
+	return lineType == PutLine || lineType == DeleteLine
 }
 
 func (m *MrT) writeLine(lineType byte, key, value []byte) (err error) {
-	var w io.Writer
-	switch lineType {
-	case PutLine, DeleteLine:
-		if m.mw == nil {
-			w = m.buf
-		} else {
-			if w, err = m.mw.Writer(m.buf); err != nil {
-				return
-			}
-		}
+	// Write line type
+	m.buf.WriteByte(lineType)
 
-	default:
-		w = m.buf
+	// If this is not a middleware write, use fast-path
+	if !m.isMWWrite(lineType) {
+		m.writeRawBytes(key, value)
+	} else {
+		if err = m.writeMWBytes(key, value); err != nil {
+			return
+		}
 	}
 
-	m.buf.WriteByte(lineType)
-	m.writeBytes(w, key)
-	m.writeBytes(w, value)
 	m.buf.WriteByte('\n')
+	return
+}
+
+func (m *MrT) writeRawBytes(key, value []byte) (err error) {
+	// We don't check for errors because only middleware can cause errors
+	m.writeBytes(m.buf, key)
+	m.writeBytes(m.buf, value)
+	return
+}
+
+func (m *MrT) writeMWBytes(key, value []byte) (err error) {
+	var w *middleware.Writer
+	if w, err = m.mw.Writer(m.buf); err != nil {
+		return
+	}
+	defer w.Close()
+
+	if err = m.writeBytes(w, key); err != nil {
+		return
+	}
+
+	if err = m.writeBytes(w, value); err != nil {
+		return
+	}
+
+	return
+}
+
+func (m *MrT) writeBytes(w io.Writer, b []byte) (err error) {
+	binary.LittleEndian.PutUint64(m.nbuf[:], uint64(len(b)))
+	if _, err = w.Write(m.nbuf[:]); err != nil {
+		return
+	}
+
+	if _, err = w.Write(b); err != nil {
+		return
+	}
+
 	return
 }
 
@@ -332,7 +376,7 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	}
 
 	// Open our archive file as an appending file
-	if af, err = file.OpenFile(path.Join(m.dir, m.name+".archive.tdb"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644); err != nil {
+	if af, err = file.OpenFile(path.Join(m.dir, "archive", m.name+".tdb"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644); err != nil {
 		return
 	}
 	defer af.Close()
