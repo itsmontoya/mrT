@@ -422,6 +422,7 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	if m.f, err = file.Create(path.Join(m.dir, m.name+".tdb")); err != nil {
 		return
 	}
+	m.s.SetFile(m.f)
 
 	return m.flush()
 }
