@@ -189,6 +189,9 @@ func (m *MrT) Txn(fn TxnFn) (err error) {
 	var txn Txn
 	m.mux.Lock()
 	defer m.mux.Unlock()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
 
 	txn.writeLine = m.writeLine
 	defer txn.clear()
@@ -209,6 +212,9 @@ func (m *MrT) Txn(fn TxnFn) (err error) {
 func (m *MrT) Comment(b []byte) (err error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
 
 	// Write the comment line
 	if err = m.writeLine(CommentLine, b, nil); err != nil {
@@ -223,6 +229,9 @@ func (m *MrT) ForEach(fn ForEachFn) (err error) {
 	var key, value []byte
 	m.mux.Lock()
 	defer m.mux.Unlock()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
 
 	if err = m.s.SeekToStart(); err != nil {
 		return
@@ -280,6 +289,9 @@ func (m *MrT) ForEachTxn(fn ForEachTxnFn) (err error) {
 
 	m.mux.Lock()
 	defer m.mux.Unlock()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
 
 	if err = m.s.SeekToStart(); err != nil {
 		return
@@ -366,7 +378,11 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 
 	m.mux.Lock()
 	defer m.mux.Unlock()
-	defer m.buf.Reset()
+	if m.closed {
+		return errors.ErrIsClosed
+	}
+
+	m.buf.Reset()
 
 	txn.writeLine = m.writeLine
 	defer txn.clear()
