@@ -10,11 +10,15 @@ import (
 	"github.com/missionMeteora/uuid"
 )
 
+// forEachState represents the match state of a ForEach/ForEachTx request
 type forEachState uint8
 
 const (
+	// statePreMatch represents an interation which has not yet matched the target transaction
 	statePreMatch forEachState = iota
+	// stateMatch represents an interation which has matched the target transaction
 	stateMatch
+	// statePostMatch represents an iteration which has matched and moved past the target transaction (ready to append)
 	statePostMatch
 )
 
