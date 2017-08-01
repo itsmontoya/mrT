@@ -10,6 +10,14 @@ import (
 	"github.com/missionMeteora/uuid"
 )
 
+type forEachState uint8
+
+const (
+	statePreMatch forEachState = iota
+	stateMatch
+	statePostMatch
+)
+
 func newForEacher(tid string, fn ForEachFn, mw *middleware.MWs, cor bool) *forEacher {
 	var fe forEacher
 	fe.tid = tid
@@ -18,9 +26,9 @@ func newForEacher(tid string, fn ForEachFn, mw *middleware.MWs, cor bool) *forEa
 	fe.cor = cor
 
 	if tid == "" {
-		fe.state = 1
+		fe.state = statePostMatch
 	} else {
-		fe.state = -1
+		fe.state = statePreMatch
 	}
 
 	return &fe
@@ -32,7 +40,7 @@ type forEacher struct {
 	mw  *middleware.MWs
 	cor bool
 	// Match state
-	state int8
+	state forEachState
 }
 
 func (fe *forEacher) processLine(buf *bytes.Buffer) (end bool) {
@@ -49,18 +57,18 @@ func (fe *forEacher) processLine(buf *bytes.Buffer) (end bool) {
 
 	switch lineType {
 	case TransactionLine, CommentLine:
-		if fe.state == -1 {
+		if fe.state == statePreMatch {
 			// Extract transaction id from the key
 			ctid, _ := getKV(buf.Bytes())
 			if string(ctid) == fe.tid {
-				fe.state = 0
+				fe.state = stateMatch
 			}
-		} else if fe.state == 0 {
-			fe.state = 1
+		} else if fe.state == stateMatch {
+			fe.state = statePostMatch
 		}
 
 	case PutLine, DeleteLine:
-		if fe.state != 1 {
+		if fe.state != statePostMatch {
 			return
 		}
 
@@ -101,9 +109,9 @@ func newTxnForEacher(tid string, fn ForEachTxnFn, mw *middleware.MWs) *txnForEac
 	fe.mw = mw
 
 	if tid == "" {
-		fe.state = 1
+		fe.state = statePostMatch
 	} else {
-		fe.state = -1
+		fe.state = statePreMatch
 	}
 
 	return &fe
@@ -115,7 +123,7 @@ type txnForEacher struct {
 	ti  *TxnInfo
 	mw  *middleware.MWs
 	// Match state
-	state int8
+	state forEachState
 }
 
 func (fe *txnForEacher) flush() {
@@ -149,14 +157,14 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (end bool) {
 		fe.flush()
 		// Extract transaction id from the key
 		tid, _ = getKV(buf.Bytes())
-		if fe.state == -1 {
+		if fe.state == statePreMatch {
 			if fe.tid == string(tid) {
-				fe.state = 0
+				fe.state = stateMatch
 			}
 
 			return
-		} else if fe.state == 0 {
-			fe.state = 1
+		} else if fe.state == stateMatch {
+			fe.state = statePostMatch
 		}
 
 		// Parse uuid from transaction id
@@ -178,7 +186,7 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (end bool) {
 			return
 		}
 
-		if fe.state != 1 {
+		if fe.state != statePostMatch {
 			return
 		}
 

@@ -308,7 +308,7 @@ func (m *MrT) ForEach(txnID string, fn ForEachFn) (err error) {
 			return
 		}
 
-		fe.state = 0
+		fe.state = stateMatch
 		err = nil
 	}
 
@@ -340,7 +340,7 @@ func (m *MrT) ForEachTxn(txnID string, fn ForEachTxnFn) (err error) {
 		}
 
 		fe.flush()
-		fe.state = 0
+		fe.state = stateMatch
 		err = nil
 	}
 
