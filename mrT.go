@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"sync"
@@ -12,7 +11,6 @@ import (
 	"github.com/itsmontoya/async/file"
 	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
-	"github.com/missionMeteora/journaler"
 	"github.com/missionMeteora/toolkit/errors"
 	"github.com/missionMeteora/uuid"
 )
@@ -34,6 +32,8 @@ const (
 const (
 	// ErrInvalidLine is returned when an invalid line is encountered while parsing
 	ErrInvalidLine = errors.Error("invalid line")
+	// ErrNoTxn is returned when no transactions are available
+	ErrNoTxn = errors.Error("no transactions available")
 )
 
 var (
@@ -165,6 +165,64 @@ func (m *MrT) writeBytes(w io.Writer, b []byte) (err error) {
 	return
 }
 
+// peekFirstTxn will return the first transaction id within the current file
+func (m *MrT) peekFirstTxn() (txnID string, err error) {
+	if err = m.s.SeekToStart(); err != nil {
+		return
+	}
+
+	rerr := m.s.ReadLines(func(buf *bytes.Buffer) (end bool) {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return true
+		}
+
+		if lineType != TransactionLine {
+			return
+		}
+
+		tidb, _ := getKV(buf.Bytes())
+		txnID = string(tidb)
+		return true
+	})
+
+	if err == nil && rerr != nil {
+		err = rerr
+		return
+	}
+
+	if txnID == "" {
+		err = ErrNoTxn
+		return
+	}
+
+	return
+}
+
+// isInCurrent will return whether or not a transaction id is within the current file
+func (m *MrT) isInCurrent(txnID string) (ok bool) {
+	var err error
+	if txnID == "" {
+		return
+	}
+
+	var ptid string
+	if ptid, err = m.peekFirstTxn(); err != nil {
+		return
+	}
+
+	var ru, pu uuid.UUID
+	if ru, err = uuid.ParseStr(txnID); err != nil {
+		return
+	}
+
+	if pu, err = uuid.ParseStr(ptid); err != nil {
+		return
+	}
+
+	return ru.Time().UnixNano() >= pu.Time().UnixNano()
+}
+
 func (m *MrT) flush() (err error) {
 	// Ensure we are at the end before flushing
 	if err = m.s.SeekToEnd(); err != nil {
@@ -178,6 +236,18 @@ func (m *MrT) flush() (err error) {
 
 func (m *MrT) rollback() {
 	m.buf.Reset()
+}
+
+func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) bool) (err error) {
+	var af *file.File
+	if af, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
+		return
+	}
+	defer af.Close()
+
+	as := seeker.New(af)
+	defer as.SetFile(nil)
+	return as.ReadLines(fn)
 }
 
 func (m *MrT) newCommitID() (commitID []byte) {
@@ -224,13 +294,22 @@ func (m *MrT) Comment(b []byte) (err error) {
 	return m.flush()
 }
 
-// ForEach will iterate through all the file lines
-func (m *MrT) ForEach(fn ForEachFn) (err error) {
-	var key, value []byte
+// ForEach will iterate through all the file lines starting from the provided transaction id
+func (m *MrT) ForEach(txnID string, fn ForEachFn) (err error) {
+	fe := newForEacher(txnID, fn, m.mw, m.cor)
 	m.mux.Lock()
 	defer m.mux.Unlock()
 	if m.closed {
 		return errors.ErrIsClosed
+	}
+
+	if !m.isInCurrent(txnID) {
+		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
+			return
+		}
+
+		fe.state = 0
+		err = nil
 	}
 
 	if err = m.s.SeekToStart(); err != nil {
@@ -238,55 +317,12 @@ func (m *MrT) ForEach(fn ForEachFn) (err error) {
 	}
 	defer m.s.SeekToEnd()
 
-	return m.s.ReadLines(func(buf *bytes.Buffer) (end bool) {
-		var lineType byte
-		if lineType, err = buf.ReadByte(); err != nil {
-			return true
-		}
-
-		switch lineType {
-		case TransactionLine, CommentLine:
-		case PutLine, DeleteLine:
-			var b []byte
-			if m.mw != nil {
-				var r io.Reader
-				if r, err = m.mw.Reader(buf); err != nil {
-					return true
-				}
-
-				if b, err = ioutil.ReadAll(r); err != nil {
-					return true
-				}
-			} else {
-				b = buf.Bytes()
-			}
-
-			if m.cor {
-				key, value = getKVSafe(b)
-			} else {
-				key, value = getKV(b)
-			}
-
-			return fn(lineType, key, value)
-
-		default:
-			err = ErrInvalidLine
-			return true
-		}
-
-		return
-	})
+	return m.s.ReadLines(fe.processLine)
 }
 
-// ForEachTxn will iterate through all the file transactions
-func (m *MrT) ForEachTxn(fn ForEachTxnFn) (err error) {
-	var (
-		ti    *TxnInfo
-		txnID []byte
-		key   []byte
-		value []byte
-	)
-
+// ForEachTxn will iterate through all the file transactions starting from the provided transaction id
+func (m *MrT) ForEachTxn(txnID string, fn ForEachTxnFn) (err error) {
+	fe := newTxnForEacher(txnID, fn, m.mw)
 	m.mux.Lock()
 	defer m.mux.Unlock()
 	if m.closed {
@@ -298,74 +334,21 @@ func (m *MrT) ForEachTxn(fn ForEachTxnFn) (err error) {
 	}
 	defer m.s.SeekToEnd()
 
-	if err = m.s.ReadLines(func(buf *bytes.Buffer) (end bool) {
-		var lineType byte
-		if lineType, err = buf.ReadByte(); err != nil {
-			return true
+	if !m.isInCurrent(txnID) {
+		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
+			return
 		}
 
-		// Switch on the first byte (line indicator)
-		switch lineType {
-		case TransactionLine:
-			if ti != nil {
-				// A transaction item already exists, let's pass it to the func!
-				fn(ti)
-			}
+		fe.flush()
+		fe.state = 0
+		err = nil
+	}
 
-			// Extract transaction id from the key
-			txnID, _ = getKV(buf.Bytes())
-
-			// Parse uuid from transaction id
-			tu, err := uuid.ParseStr(string(txnID))
-			if err != nil {
-				// Something is definitely wrong here
-				// TODO: Handle error logging
-				journaler.Error("Error parsing transaction: %v", err)
-				return
-			}
-
-			ti = &TxnInfo{
-				ID: string(txnID),
-				TS: tu.Time().Unix(),
-			}
-
-		case CommentLine:
-		case PutLine, DeleteLine:
-			if ti == nil {
-				return
-			}
-
-			var b []byte
-			if m.mw != nil {
-				var r io.Reader
-				if r, err = m.mw.Reader(buf); err != nil {
-					return true
-				}
-
-				if b, err = ioutil.ReadAll(r); err != nil {
-					return true
-				}
-			} else {
-				b = buf.Bytes()
-			}
-
-			key, value = getKV(b)
-			ti.Actions = append(ti.Actions, newActionInfo(lineType == PutLine, key, value))
-
-		default:
-			err = ErrInvalidLine
-			return true
-		}
-
-		return
-	}); err != nil {
+	if err = m.s.ReadLines(fe.processLine); err != nil {
 		return
 	}
 
-	if ti != nil {
-		fn(ti)
-	}
-
+	fe.flush()
 	return
 }
 
