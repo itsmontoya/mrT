@@ -171,10 +171,10 @@ func (m *MrT) peekFirstTxn() (txnID string, err error) {
 		return
 	}
 
-	rerr := m.s.ReadLines(func(buf *bytes.Buffer) (end bool) {
+	if err = m.s.ReadLines(func(buf *bytes.Buffer) (err error) {
 		var lineType byte
 		if lineType, err = buf.ReadByte(); err != nil {
-			return true
+			return
 		}
 
 		if lineType != TransactionLine {
@@ -183,11 +183,8 @@ func (m *MrT) peekFirstTxn() (txnID string, err error) {
 
 		tidb, _ := getKV(buf.Bytes())
 		txnID = string(tidb)
-		return true
-	})
-
-	if err == nil && rerr != nil {
-		err = rerr
+		return seeker.ErrEndEarly
+	}); err != nil {
 		return
 	}
 
@@ -238,7 +235,7 @@ func (m *MrT) rollback() {
 	m.buf.Reset()
 }
 
-func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) bool) (err error) {
+func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) error) (err error) {
 	var af *file.File
 	if af, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
 		return
@@ -426,10 +423,10 @@ func (m *MrT) Close() (err error) {
 }
 
 // ForEachFn is used for iterating through entries
-type ForEachFn func(lineType byte, key, value []byte) (end bool)
+type ForEachFn func(lineType byte, key, value []byte) (err error)
 
 // ForEachTxnFn is used for iterating through transactions
-type ForEachTxnFn func(ti *TxnInfo) (end bool)
+type ForEachTxnFn func(ti *TxnInfo) (err error)
 
 // TxnFn is used for transactions
 type TxnFn func(txn *Txn) error
@@ -459,8 +456,12 @@ type ActionInfo struct {
 	Value string `json:"value"`
 }
 
-func getFirstCommit(buf *bytes.Buffer) (end bool) {
-	return buf.Bytes()[0] == TransactionLine
+func getFirstCommit(buf *bytes.Buffer) (err error) {
+	if buf.Bytes()[0] == TransactionLine {
+		return seeker.ErrEndEarly
+	}
+
+	return
 }
 
 // getKV will extract the key and value from a payload

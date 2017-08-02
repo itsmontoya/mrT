@@ -47,16 +47,15 @@ type forEacher struct {
 	state forEachState
 }
 
-func (fe *forEacher) processLine(buf *bytes.Buffer) (end bool) {
+func (fe *forEacher) processLine(buf *bytes.Buffer) (err error) {
 	var (
 		lineType byte
 		key      []byte
 		value    []byte
-		err      error
 	)
 
 	if lineType, err = buf.ReadByte(); err != nil {
-		return true
+		return
 	}
 
 	switch lineType {
@@ -80,11 +79,11 @@ func (fe *forEacher) processLine(buf *bytes.Buffer) (end bool) {
 		if fe.mw != nil {
 			var r io.Reader
 			if r, err = fe.mw.Reader(buf); err != nil {
-				return true
+				return
 			}
 
 			if b, err = ioutil.ReadAll(r); err != nil {
-				return true
+				return
 			}
 		} else {
 			b = buf.Bytes()
@@ -99,8 +98,7 @@ func (fe *forEacher) processLine(buf *bytes.Buffer) (end bool) {
 		return fe.fn(lineType, key, value)
 
 	default:
-		err = ErrInvalidLine
-		return true
+		return ErrInvalidLine
 	}
 
 	return
@@ -141,18 +139,17 @@ func (fe *txnForEacher) flush() {
 	fe.ti = nil
 }
 
-func (fe *txnForEacher) processLine(buf *bytes.Buffer) (end bool) {
+func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 	var (
 		lineType byte
 
 		tid   []byte
 		key   []byte
 		value []byte
-		err   error
 	)
 
 	if lineType, err = buf.ReadByte(); err != nil {
-		return true
+		return
 	}
 
 	// Switch on the first byte (line indicator)
@@ -172,8 +169,8 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (end bool) {
 		}
 
 		// Parse uuid from transaction id
-		tu, err := uuid.ParseStr(string(tid))
-		if err != nil {
+		var tu uuid.UUID
+		if tu, err = uuid.ParseStr(string(tid)); err != nil {
 			// Something is definitely wrong here
 			journaler.Error("Error parsing transaction: %v", err)
 			return
@@ -198,11 +195,11 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (end bool) {
 		if fe.mw != nil {
 			var r io.Reader
 			if r, err = fe.mw.Reader(buf); err != nil {
-				return true
+				return
 			}
 
 			if b, err = ioutil.ReadAll(r); err != nil {
-				return true
+				return
 			}
 		} else {
 			b = buf.Bytes()
@@ -213,7 +210,7 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (end bool) {
 
 	default:
 		err = ErrInvalidLine
-		return true
+		return
 	}
 
 	return

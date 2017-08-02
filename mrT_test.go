@@ -104,7 +104,7 @@ func TestMrT(t *testing.T) {
 
 func testForEach(m *MrT, start string, n int) (err error) {
 	var entryCount int
-	if err = m.ForEach(start, func(lineType byte, key []byte, value []byte) (end bool) {
+	if err = m.ForEach(start, func(lineType byte, key []byte, value []byte) (err error) {
 		entryCount++
 		return
 	}); err != nil {
@@ -120,34 +120,30 @@ func testForEach(m *MrT, start string, n int) (err error) {
 
 func testForEachTxn(m *MrT, start string, n int) (err error) {
 	var entryCount int
-	if terr := m.ForEachTxn(start, func(ti *TxnInfo) (end bool) {
+	if err = m.ForEachTxn(start, func(ti *TxnInfo) (err error) {
 		switch entryCount {
 		case 0:
 			if len(ti.Actions) != 2 {
-				err = fmt.Errorf(testInvalidActionsFmt, 2, len(ti.Actions))
-				return true
+				return fmt.Errorf(testInvalidActionsFmt, 2, len(ti.Actions))
 			}
 
 		case 1:
 			if len(ti.Actions) != 1 {
-				err = fmt.Errorf(testInvalidActionsFmt, 1, len(ti.Actions))
-				return true
+				return fmt.Errorf(testInvalidActionsFmt, 1, len(ti.Actions))
 			}
 
 		case 2:
 			if len(ti.Actions) != 1 {
-				err = fmt.Errorf(testInvalidActionsFmt, 1, len(ti.Actions))
-				return true
+				return fmt.Errorf(testInvalidActionsFmt, 1, len(ti.Actions))
 			}
 
 		default:
-			err = fmt.Errorf("invalid number of entries, recieved %d", entryCount)
-			return true
+			return fmt.Errorf("invalid number of entries, recieved %d", entryCount)
 		}
 
 		entryCount++
 		return
-	}); terr != nil || err != nil {
+	}); err != nil {
 		return
 	}
 
