@@ -49,9 +49,8 @@ type forEacher struct {
 
 func (fe *forEacher) processLine(buf *bytes.Buffer) (err error) {
 	var (
-		lineType byte
-		key      []byte
-		value    []byte
+		lineType   byte
+		key, value []byte
 	)
 
 	if lineType, err = buf.ReadByte(); err != nil {
@@ -141,11 +140,10 @@ func (fe *txnForEacher) flush() {
 
 func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 	var (
-		lineType byte
-
-		tid   []byte
-		key   []byte
-		value []byte
+		lineType   byte
+		key, value []byte
+		// Transaction id
+		tid []byte
 	)
 
 	if lineType, err = buf.ReadByte(); err != nil {
