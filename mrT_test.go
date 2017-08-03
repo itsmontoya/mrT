@@ -104,7 +104,7 @@ func TestMrT(t *testing.T) {
 
 func testForEach(m *MrT, start string, n int) (err error) {
 	var entryCount int
-	if err = m.ForEach(start, func(lineType byte, key []byte, value []byte) (err error) {
+	if err = m.ForEach(start, true, func(lineType byte, key []byte, value []byte) (err error) {
 		entryCount++
 		return
 	}); err != nil {
@@ -120,7 +120,7 @@ func testForEach(m *MrT, start string, n int) (err error) {
 
 func testForEachTxn(m *MrT, start string, n int) (err error) {
 	var entryCount int
-	if err = m.ForEachTxn(start, func(ti *TxnInfo) (err error) {
+	if err = m.ForEachTxn(start, true, func(ti *TxnInfo) (err error) {
 		switch entryCount {
 		case 0:
 			if len(ti.Actions) != 2 {
