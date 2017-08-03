@@ -292,7 +292,7 @@ func (m *MrT) Comment(b []byte) (err error) {
 }
 
 // ForEach will iterate through all the file lines starting from the provided transaction id
-func (m *MrT) ForEach(txnID string, fn ForEachFn) (err error) {
+func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
 	fe := newForEacher(txnID, fn, m.mw, m.cor)
 	m.mux.Lock()
 	defer m.mux.Unlock()
@@ -300,7 +300,7 @@ func (m *MrT) ForEach(txnID string, fn ForEachFn) (err error) {
 		return errors.ErrIsClosed
 	}
 
-	if !m.isInCurrent(txnID) {
+	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
 			return
 		}
@@ -318,7 +318,7 @@ func (m *MrT) ForEach(txnID string, fn ForEachFn) (err error) {
 }
 
 // ForEachTxn will iterate through all the file transactions starting from the provided transaction id
-func (m *MrT) ForEachTxn(txnID string, fn ForEachTxnFn) (err error) {
+func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error) {
 	fe := newTxnForEacher(txnID, fn, m.mw)
 	m.mux.Lock()
 	defer m.mux.Unlock()
@@ -331,7 +331,7 @@ func (m *MrT) ForEachTxn(txnID string, fn ForEachTxnFn) (err error) {
 	}
 	defer m.s.SeekToEnd()
 
-	if !m.isInCurrent(txnID) {
+	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
 			return
 		}
