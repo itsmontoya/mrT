@@ -1,6 +1,7 @@
 package mrT
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"testing"
@@ -39,7 +40,7 @@ func TestMrT(t *testing.T) {
 		return
 	}
 
-	if firstTxn, err = m.peekFirstTxn(); err != nil {
+	if firstTxn, err = peekFirstTxn(m.s); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,6 +99,51 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	buf := bytes.NewBuffer(nil)
+	if err = m.Export("", buf); err != nil {
+		t.Fatal(err)
+	}
+
+	journaler.Debug("Buffah?\n %s\n\n", buf.String())
+
+	var nm *MrT
+	if nm, err = New("./testing2/", "testing"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll("./testing2/")
+
+	var lastTxn string
+	if lastTxn, err = nm.Import(buf, func(lineType byte, key, val []byte) (err error) {
+		journaler.Debug("Import line: %d %s %s", lineType, string(key), string(val))
+		return
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	journaler.Debug("Last txn: %s\n\n", lastTxn)
+
+	if err = m.Txn(func(txn *Txn) (err error) {
+		txn.Put([]byte("name"), []byte("foo"))
+		return
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = m.Export(lastTxn, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	journaler.Debug("New export done")
+
+	if lastTxn, err = nm.Import(buf, func(lineType byte, key, val []byte) (err error) {
+		journaler.Debug("Import line: %d %s %s", lineType, string(key), string(val))
+		return
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	journaler.Debug("Last txn: %s", lastTxn)
+
 	journaler.Success("Done!")
 	return
 }
@@ -105,6 +151,10 @@ func TestMrT(t *testing.T) {
 func testForEach(m *MrT, start string, n int) (err error) {
 	var entryCount int
 	if err = m.ForEach(start, true, func(lineType byte, key []byte, value []byte) (err error) {
+		if lineType != PutLine && lineType != DeleteLine {
+			return
+		}
+
 		entryCount++
 		return
 	}); err != nil {
