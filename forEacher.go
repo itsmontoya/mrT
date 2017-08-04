@@ -170,6 +170,8 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 			TS: tu.Time().Unix(),
 		}
 
+	case ReplayLine:
+		fe.state = stateMatch
 	case CommentLine:
 	case PutLine, DeleteLine:
 		if fe.ti == nil {
@@ -244,6 +246,9 @@ func forEachProcess(tid string, ltid *string, sp *forEachState, buf *bytes.Buffe
 		}
 
 		*ltid = string(ctid)
+
+	case ReplayLine:
+		*sp = stateMatch
 
 	case PutLine, DeleteLine:
 		if state != statePostMatch {

@@ -22,8 +22,10 @@ import (
 const (
 	// NilLine represents a zero-value for line types
 	NilLine byte = iota
-	// TransactionLine is the line with the transaction tag for the data lines following it
+	// TransactionLine is a line with the transaction tag for the data lines following it
 	TransactionLine
+	// ReplayLine is a line which signals the replay through a transaction
+	ReplayLine
 	// CommentLine is a comment line, will be ignored when parsing data
 	// Note: This line type will always ignore middleware
 	CommentLine
@@ -283,20 +285,32 @@ func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
 	}
 
 	journaler.Debug("ForEach: %s %v %v", txnID, archive, m.isInCurrent(txnID))
-	if archive && !m.isInCurrent(txnID) {
-		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
-			return
-		}
-
-		fe.state = stateMatch
-		err = nil
-	}
-
 	if err = m.s.SeekToStart(); err != nil {
 		return
 	}
 	defer m.s.SeekToEnd()
 
+	if archive && !m.isInCurrent(txnID) {
+		journaler.Debug("Hittin that archive")
+		if err = m.readArchiveLines(fe.processLine); err == nil {
+			var tid string
+			if tid, err = nextTxn(m.s); err == ErrNoTxn {
+				// We do not have any new transactions after our replay id, no need to read from current
+				return nil
+			} else if err != nil {
+				return
+			}
+
+			journaler.Debug("THE NEXT: %s", tid)
+		} else if os.IsNotExist(err) {
+			// No archive exists, we can still pull from current though
+			err = nil
+		} else {
+			return
+		}
+	}
+
+	journaler.Debug("Hitting that current")
 	return m.s.ReadLines(fe.processLine)
 }
 
@@ -367,9 +381,9 @@ func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error
 // Archive will archive the current data
 func (m *MrT) Archive(populate TxnFn) (err error) {
 	var (
-		af       *file.File
-		txn      Txn
-		firstTxn string
+		af      *file.File
+		txn     Txn
+		lastTxn string
 	)
 
 	m.mux.Lock()
@@ -379,17 +393,18 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	}
 
 	journaler.Debug("Archiving!")
-	if firstTxn, err = peekLastTxn(m.s); err != nil {
+	if lastTxn, err = peekLastTxn(m.s); err != nil {
+		journaler.Debug("peek error: %s %v", lastTxn, err)
 		return
 	}
 
-	journaler.Debug("First txn: %s", firstTxn)
+	journaler.Debug("Last txn txn: %s", lastTxn)
 	m.buf.Reset()
 
 	txn.writeLine = m.writeLine
 	defer txn.clear()
 
-	if err = txn.writeLine(TransactionLine, []byte(firstTxn), nil); err != nil {
+	if err = txn.writeLine(ReplayLine, []byte(lastTxn), nil); err != nil {
 		return
 	}
 
@@ -591,11 +606,17 @@ func prevTxn(s *seeker.Seeker) (txnID string, err error) {
 			return
 		}
 
+		if len(txnID) > 0 {
+			break
+		}
+
 		// Gets us to the beginning of the current line
 		if err = s.PrevLine(); err != nil {
 			return
 		}
 	}
+
+	return
 }
 
 // nextTxn will return the next transaction id within the current file
@@ -612,6 +633,7 @@ func nextTxn(s *seeker.Seeker) (txnID string, err error) {
 
 		tidb, _ := getKV(buf.Bytes())
 		txnID = string(tidb)
+
 		return seeker.ErrEndEarly
 	}); err != nil {
 		return

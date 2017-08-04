@@ -56,11 +56,13 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.Archive(func(txn *Txn) (err error) {
+	if err = m.Archive(func(txn *Txn) (err error) {
 		txn.Put([]byte("greeting"), []byte("hello"))
 		txn.Put([]byte("name"), []byte("John Doe"))
 		return
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err = testForEach(m, firstTxn, 1); err != nil {
 		t.Fatal(err)
@@ -85,11 +87,13 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.Archive(func(txn *Txn) (err error) {
+	if err = m.Archive(func(txn *Txn) (err error) {
 		txn.Put([]byte("greeting"), []byte("hello"))
 		txn.Put([]byte("name"), []byte("derp"))
 		return
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err = testForEach(m, "", 4); err != nil {
 		t.Fatal(err)
