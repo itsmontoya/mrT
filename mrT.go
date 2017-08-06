@@ -3,7 +3,6 @@ package mrT
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/missionMeteora/journaler"
 	"io"
 	"io/ioutil"
 	"os"
@@ -178,6 +177,12 @@ func (m *MrT) isInCurrent(txnID string) (ok bool) {
 		return
 	}
 
+	var rtid string
+	rtid, err = replayID(m.s)
+	if err == nil && rtid == txnID {
+		return true
+	}
+
 	var ptid string
 	if ptid, err = peekFirstTxn(m.s); err != nil {
 		return
@@ -284,24 +289,21 @@ func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
 		return errors.ErrIsClosed
 	}
 
-	journaler.Debug("ForEach: %s %v %v", txnID, archive, m.isInCurrent(txnID))
 	if err = m.s.SeekToStart(); err != nil {
 		return
 	}
 	defer m.s.SeekToEnd()
 
 	if archive && !m.isInCurrent(txnID) {
-		journaler.Debug("Hittin that archive")
 		if err = m.readArchiveLines(fe.processLine); err == nil {
-			var tid string
-			if tid, err = nextTxn(m.s); err == ErrNoTxn {
+			if _, err = nextTxn(m.s); err == ErrNoTxn {
 				// We do not have any new transactions after our replay id, no need to read from current
 				return nil
 			} else if err != nil {
 				return
 			}
 
-			journaler.Debug("THE NEXT: %s", tid)
+			fe.state = stateMatch
 		} else if os.IsNotExist(err) {
 			// No archive exists, we can still pull from current though
 			err = nil
@@ -310,7 +312,6 @@ func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
 		}
 	}
 
-	journaler.Debug("Hitting that current")
 	return m.s.ReadLines(fe.processLine)
 }
 
@@ -324,7 +325,6 @@ func (m *MrT) ForEachRaw(txnID string, archive bool, fn ForEachRawFn) (err error
 		return
 	}
 
-	journaler.Debug("ForEachRaw: %s %v %v", txnID, archive, m.isInCurrent(txnID))
 	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
 			return
@@ -392,15 +392,11 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 		return errors.ErrIsClosed
 	}
 
-	journaler.Debug("Archiving!")
 	if lastTxn, err = peekLastTxn(m.s); err != nil {
-		journaler.Debug("peek error: %s %v", lastTxn, err)
 		return
 	}
 
-	journaler.Debug("Last txn txn: %s", lastTxn)
 	m.buf.Reset()
-
 	txn.writeLine = m.writeLine
 	defer txn.clear()
 
@@ -482,12 +478,10 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 
 	// Copy from inbound reader to temporary file
 	if _, err = io.Copy(tmpF, r); err != nil {
-		journaler.Debug("Oh noes: %v", err)
 		return
 	}
 
 	if _, err = tmpF.Seek(0, os.SEEK_SET); err != nil {
-		journaler.Debug("Oh noes: %v", err)
 		return
 	}
 
@@ -502,13 +496,15 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 	var n int64
 	// Parse payload, check for proper token and signature
 	if _, n, err = shasher.ParseWithToken(m.getToken(), tmpF, m.f); err != nil {
-		journaler.Error("Oh noes: %v", err)
+		return
+	}
+
+	if err = m.f.Sync(); err != nil {
 		return
 	}
 
 	// Seek back to before we started writing
 	if _, err = m.f.Seek(-n, os.SEEK_CUR); err != nil {
-		journaler.Debug("Oh noes: %v", err)
 		return
 	}
 
@@ -529,7 +525,10 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 		return
 	}
 
-	if err = m.ForEachRaw(txnID, txnID != "", func(line []byte) (err error) {
+	// If our reference transaction is empty, export the current data set
+	archive := txnID != ""
+
+	if err = m.ForEachRaw(txnID, archive, func(line []byte) (err error) {
 		if _, err = hw.Write(line); err != nil {
 			return
 		}
@@ -616,6 +615,33 @@ func prevTxn(s *seeker.Seeker) (txnID string, err error) {
 		}
 	}
 
+	return
+}
+
+func replayID(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.SeekToStart(); err != nil {
+		return
+	}
+
+	if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return
+		}
+
+		if lineType != ReplayLine {
+			return ErrNoTxn
+		}
+
+		tidb, _ := getKV(buf.Bytes())
+		txnID = string(tidb)
+		return
+	}); err != nil {
+		return
+	}
+
+	// Set cursor to the beginning of the transaction line
+	s.PrevLine()
 	return
 }
 

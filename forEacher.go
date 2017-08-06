@@ -143,7 +143,7 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 
 	// Switch on the first byte (line indicator)
 	switch lineType {
-	case TransactionLine:
+	case TransactionLine, ReplayLine:
 		fe.flush()
 		// Extract transaction id from the key
 		tid, _ = getKV(buf.Bytes())
@@ -160,7 +160,7 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 		// Parse uuid from transaction id
 		var tu uuid.UUID
 		if tu, err = uuid.ParseStr(string(tid)); err != nil {
-			// Something is definitely wrong here
+			// Something is definitely wrong here (almost enough to panic)
 			journaler.Error("Error parsing transaction: %v", err)
 			return
 		}
@@ -170,8 +170,6 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 			TS: tu.Time().Unix(),
 		}
 
-	case ReplayLine:
-		fe.state = stateMatch
 	case CommentLine:
 	case PutLine, DeleteLine:
 		if fe.ti == nil {
@@ -230,7 +228,8 @@ func forEachProcess(tid string, ltid *string, sp *forEachState, buf *bytes.Buffe
 
 	state := *sp
 	switch lineType {
-	case TransactionLine, CommentLine:
+	case CommentLine:
+	case TransactionLine, ReplayLine:
 		// Extract transaction id from the key
 		ctid, _ := getKV(buf.Bytes())
 
@@ -246,9 +245,6 @@ func forEachProcess(tid string, ltid *string, sp *forEachState, buf *bytes.Buffe
 		}
 
 		*ltid = string(ctid)
-
-	case ReplayLine:
-		*sp = stateMatch
 
 	case PutLine, DeleteLine:
 		if state != statePostMatch {

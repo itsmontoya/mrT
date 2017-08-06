@@ -108,8 +108,6 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	journaler.Debug("Buffah?\n %s\n\n", buf.String())
-
 	var nm *MrT
 	if nm, err = New("./testing2/", "testing"); err != nil {
 		t.Fatal(err)
@@ -117,14 +115,19 @@ func TestMrT(t *testing.T) {
 	defer os.RemoveAll("./testing2/")
 
 	var lastTxn string
-	if lastTxn, err = nm.Import(buf, func(lineType byte, key, val []byte) (err error) {
-		journaler.Debug("Import line: %d %s %s", lineType, string(key), string(val))
-		return
-	}); err != nil {
+	if lastTxn, err = nm.Import(buf, testNilForEach); err != nil {
 		t.Fatal(err)
 	}
 
-	journaler.Debug("Last txn: %s\n\n", lastTxn)
+	// We will only expect two entries because we will pull the "current" data
+	if err = testForEach(nm, "", 2); err != nil {
+		t.Fatal(err)
+	}
+
+	// We will only expect one transaction because we will pull the "current" data
+	if err = testForEachTxn(nm, "", 1); err != nil {
+		t.Fatal(err)
+	}
 
 	if err = m.Txn(func(txn *Txn) (err error) {
 		txn.Put([]byte("name"), []byte("foo"))
@@ -137,18 +140,20 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	journaler.Debug("New export done")
-
-	if lastTxn, err = nm.Import(buf, func(lineType byte, key, val []byte) (err error) {
-		journaler.Debug("Import line: %d %s %s", lineType, string(key), string(val))
-		return
-	}); err != nil {
+	if lastTxn, err = nm.Import(buf, testNilForEach); err != nil {
 		t.Fatal(err)
 	}
 
-	journaler.Debug("Last txn: %s", lastTxn)
+	// We will only expect two entries because we will pull the "current" data
+	if err = testForEach(nm, "", 3); err != nil {
+		t.Fatal(err)
+	}
 
-	journaler.Success("Done!")
+	journaler.Success("Testing complete")
+	return
+}
+
+func testNilForEach(lineType byte, key, value []byte) (err error) {
 	return
 }
 
