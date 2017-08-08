@@ -3,7 +3,6 @@ package mrT
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/missionMeteora/journaler"
 
 	"github.com/itsmontoya/seeker"
 )
@@ -55,7 +54,6 @@ func getFirstCommit(buf *bytes.Buffer) (err error) {
 
 // getKV will extract the key and value from a payload
 func getKV(b []byte) (key, value []byte) {
-	journaler.Debug("KV: %s %d", string(b), len(b))
 	// Set index at 8 to accommodate 8 bytes for key length
 	idx := uint64(8)
 	// Get key length
