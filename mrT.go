@@ -280,9 +280,35 @@ func (m *MrT) Comment(b []byte) (err error) {
 	return m.flush()
 }
 
-// ForEach will iterate through all the file lines starting from the provided transaction id
-func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
-	fe := newForEacher(txnID, fn, m.mw, m.cor)
+// filter will iterate through filtered lines
+func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) (err error) {
+	f := newFilter(fn, filters)
+
+	if archive && !m.isInCurrent(txnID) {
+		if err = m.readArchiveLines(f.processLine); err == nil {
+			if _, err = nextTxn(m.s); err == ErrNoTxn {
+				// We do not have any new transactions after our replay id, no need to read from current
+				return nil
+			} else if err != nil {
+				return
+			}
+		} else if os.IsNotExist(err) {
+			// No archive exists, we can still pull from current though
+			err = nil
+		} else {
+			return
+		}
+	}
+
+	if err = m.s.ReadLines(f.processLine); err != nil {
+		return
+	}
+
+	return
+}
+
+// Filter will iterate through filtered lines
+func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter) (err error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 	if m.closed {
@@ -294,56 +320,55 @@ func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
 	}
 	defer m.s.SeekToEnd()
 
-	if archive && !m.isInCurrent(txnID) {
-		if err = m.readArchiveLines(fe.processLine); err == nil {
-			if _, err = nextTxn(m.s); err == ErrNoTxn {
-				// We do not have any new transactions after our replay id, no need to read from current
-				return nil
-			} else if err != nil {
-				return
-			}
-
-			fe.state = stateMatch
-		} else if os.IsNotExist(err) {
-			// No archive exists, we can still pull from current though
-			err = nil
-		} else {
-			return
-		}
-	}
-
-	return m.s.ReadLines(fe.processLine)
+	return m.filter(txnID, archive, fn, filters)
 }
 
-// ForEachRaw will iterate through all the file lines starting from the provided transaction id
-func (m *MrT) ForEachRaw(txnID string, archive bool, fn ForEachRawFn) (err error) {
-	fe := newRawForEacher(txnID, fn, m.cor)
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
-		err = errors.ErrIsClosed
+func (m *MrT) processLine(buf *bytes.Buffer) (lineType byte, key, value []byte, err error) {
+	if lineType, err = buf.ReadByte(); err != nil {
+		// Error encountered getting line type
 		return
 	}
 
-	if archive && !m.isInCurrent(txnID) {
-		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
-			return
-		}
+	switch lineType {
+	case TransactionLine:
+		key, value = getKV(buf.Bytes())
 
-		fe.state = stateMatch
-		err = nil
-	}
+	case CommentLine, ReplayLine:
+		key, value = getKV(buf.Bytes())
 
-	if err = m.s.SeekToStart(); err != nil {
-		return
-	}
-	defer m.s.SeekToEnd()
+	case PutLine, DeleteLine:
+		key, value, err = getProcessedKV(buf, m.mw, m.cor)
 
-	if err = m.s.ReadLines(fe.processLine); err != nil {
-		return
+	default:
+		err = ErrInvalidLine
 	}
 
 	return
+}
+
+// ForEach will iterate through all the file lines starting from the provided transaction id
+func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
+	match := NewMatch(txnID)
+	return m.Filter(txnID, archive, func(buf *bytes.Buffer) (err error) {
+		var (
+			lineType   byte
+			key, value []byte
+		)
+
+		if lineType, key, value, err = m.processLine(buf); err != nil {
+			return
+		}
+
+		return fn(lineType, key, value)
+	}, match)
+}
+
+// ForEachRaw will iterate through all the raw file lines starting from the provided transaction id
+func (m *MrT) ForEachRaw(txnID string, archive bool, fn ForEachRawFn) (err error) {
+	match := NewMatch(txnID)
+	return m.Filter(txnID, archive, func(buf *bytes.Buffer) (err error) {
+		return fn(buf.Bytes())
+	}, match)
 }
 
 // ForEachTxn will iterate through all the file transactions starting from the provided transaction id
@@ -508,13 +533,23 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 		return
 	}
 
-	// ForEach
-	fe := newForEacher("", fn, m.mw, m.cor)
-	if err = m.s.ReadLines(fe.processLine); err != nil {
-		return
-	}
+	m.filter("", false, func(buf *bytes.Buffer) (err error) {
+		var (
+			lineType byte
+			key, val []byte
+		)
 
-	lastTxn = fe.ltid
+		if lineType, key, val, err = m.processLine(buf); err != nil {
+			return
+		}
+
+		if lineType == TransactionLine || lineType == ReplayLine {
+			lastTxn = string(key)
+		}
+
+		return fn(lineType, key, val)
+	}, nil)
+
 	return
 }
 
