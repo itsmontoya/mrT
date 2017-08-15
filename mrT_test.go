@@ -1,6 +1,7 @@
 package mrT
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"testing"
@@ -39,7 +40,7 @@ func TestMrT(t *testing.T) {
 		return
 	}
 
-	if firstTxn, err = m.peekFirstTxn(); err != nil {
+	if firstTxn, err = peekFirstTxn(m.s); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,11 +56,13 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.Archive(func(txn *Txn) (err error) {
+	if err = m.Archive(func(txn *Txn) (err error) {
 		txn.Put([]byte("greeting"), []byte("hello"))
 		txn.Put([]byte("name"), []byte("John Doe"))
 		return
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err = testForEach(m, firstTxn, 1); err != nil {
 		t.Fatal(err)
@@ -84,11 +87,13 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.Archive(func(txn *Txn) (err error) {
+	if err = m.Archive(func(txn *Txn) (err error) {
 		txn.Put([]byte("greeting"), []byte("hello"))
 		txn.Put([]byte("name"), []byte("derp"))
 		return
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err = testForEach(m, "", 4); err != nil {
 		t.Fatal(err)
@@ -98,13 +103,67 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	journaler.Success("Done!")
+	buf := bytes.NewBuffer(nil)
+	if err = m.Export("", buf); err != nil {
+		t.Fatal(err)
+	}
+
+	var nm *MrT
+	if nm, err = New("./testing2/", "testing"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll("./testing2/")
+
+	var lastTxn string
+	if lastTxn, err = nm.Import(buf, testNilForEach); err != nil {
+		t.Fatal(err)
+	}
+
+	// We will only expect two entries because we will pull the "current" data
+	if err = testForEach(nm, "", 2); err != nil {
+		t.Fatal(err)
+	}
+
+	// We will only expect one transaction because we will pull the "current" data
+	if err = testForEachTxn(nm, "", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = m.Txn(func(txn *Txn) (err error) {
+		txn.Put([]byte("name"), []byte("foo"))
+		return
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = m.Export(lastTxn, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if lastTxn, err = nm.Import(buf, testNilForEach); err != nil {
+		t.Fatal(err)
+	}
+
+	// We will only expect two entries because we will pull the "current" data
+	if err = testForEach(nm, "", 3); err != nil {
+		t.Fatal(err)
+	}
+
+	journaler.Success("Testing complete")
+	return
+}
+
+func testNilForEach(lineType byte, key, value []byte) (err error) {
 	return
 }
 
 func testForEach(m *MrT, start string, n int) (err error) {
 	var entryCount int
 	if err = m.ForEach(start, true, func(lineType byte, key []byte, value []byte) (err error) {
+		if lineType != PutLine && lineType != DeleteLine {
+			return
+		}
+
 		entryCount++
 		return
 	}); err != nil {

@@ -22,87 +22,6 @@ const (
 	statePostMatch
 )
 
-func newForEacher(tid string, fn ForEachFn, mw *middleware.MWs, cor bool) *forEacher {
-	var fe forEacher
-	fe.tid = tid
-	fe.fn = fn
-	fe.mw = mw
-	fe.cor = cor
-
-	if tid == "" {
-		fe.state = statePostMatch
-	} else {
-		fe.state = statePreMatch
-	}
-
-	return &fe
-}
-
-type forEacher struct {
-	tid string
-	fn  ForEachFn
-	mw  *middleware.MWs
-	cor bool
-	// Match state
-	state forEachState
-}
-
-func (fe *forEacher) processLine(buf *bytes.Buffer) (err error) {
-	var (
-		lineType   byte
-		key, value []byte
-	)
-
-	if lineType, err = buf.ReadByte(); err != nil {
-		return
-	}
-
-	switch lineType {
-	case TransactionLine, CommentLine:
-		if fe.state == statePreMatch {
-			// Extract transaction id from the key
-			ctid, _ := getKV(buf.Bytes())
-			if string(ctid) == fe.tid {
-				fe.state = stateMatch
-			}
-		} else if fe.state == stateMatch {
-			fe.state = statePostMatch
-		}
-
-	case PutLine, DeleteLine:
-		if fe.state != statePostMatch {
-			return
-		}
-
-		var b []byte
-		if fe.mw != nil {
-			var r io.Reader
-			if r, err = fe.mw.Reader(buf); err != nil {
-				return
-			}
-
-			if b, err = ioutil.ReadAll(r); err != nil {
-				return
-			}
-		} else {
-			b = buf.Bytes()
-		}
-
-		if fe.cor {
-			key, value = getKVSafe(b)
-		} else {
-			key, value = getKV(b)
-		}
-
-		return fe.fn(lineType, key, value)
-
-	default:
-		return ErrInvalidLine
-	}
-
-	return
-}
-
 func newTxnForEacher(tid string, fn ForEachTxnFn, mw *middleware.MWs) *txnForEacher {
 	var fe txnForEacher
 	fe.tid = tid
@@ -152,7 +71,7 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 
 	// Switch on the first byte (line indicator)
 	switch lineType {
-	case TransactionLine:
+	case TransactionLine, ReplayLine:
 		fe.flush()
 		// Extract transaction id from the key
 		tid, _ = getKV(buf.Bytes())
@@ -169,7 +88,7 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 		// Parse uuid from transaction id
 		var tu uuid.UUID
 		if tu, err = uuid.ParseStr(string(tid)); err != nil {
-			// Something is definitely wrong here
+			// Something is definitely wrong here (almost enough to panic)
 			journaler.Error("Error parsing transaction: %v", err)
 			return
 		}
@@ -189,26 +108,41 @@ func (fe *txnForEacher) processLine(buf *bytes.Buffer) (err error) {
 			return
 		}
 
-		var b []byte
-		if fe.mw != nil {
-			var r io.Reader
-			if r, err = fe.mw.Reader(buf); err != nil {
-				return
-			}
-
-			if b, err = ioutil.ReadAll(r); err != nil {
-				return
-			}
-		} else {
-			b = buf.Bytes()
+		if key, value, err = getProcessedKV(buf, fe.mw, true); err != nil {
+			return
 		}
 
-		key, value = getKV(b)
 		fe.ti.Actions = append(fe.ti.Actions, newActionInfo(lineType == PutLine, key, value))
 
 	default:
 		err = ErrInvalidLine
 		return
+	}
+
+	return
+}
+
+type forEachKVFn func(buf *bytes.Buffer, mw *middleware.MWs, cor bool) (key, val []byte, err error)
+
+func getProcessedKV(buf *bytes.Buffer, mw *middleware.MWs, cor bool) (key, val []byte, err error) {
+	var b []byte
+	if mw != nil {
+		var r io.Reader
+		if r, err = mw.Reader(buf); err != nil {
+			return
+		}
+
+		if b, err = ioutil.ReadAll(r); err != nil {
+			return
+		}
+	} else {
+		b = buf.Bytes()
+	}
+
+	if !cor {
+		key, val = getKV(b)
+	} else {
+		key, val = getKVSafe(b)
 	}
 
 	return

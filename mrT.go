@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"io/ioutil"
 	"os"
 	"path"
+	"strings"
 	"sync"
 
+	"github.com/Path94/fileutils/shasher"
 	"github.com/itsmontoya/async/file"
 	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
@@ -18,8 +21,10 @@ import (
 const (
 	// NilLine represents a zero-value for line types
 	NilLine byte = iota
-	// TransactionLine is the line with the transaction tag for the data lines following it
+	// TransactionLine is a line with the transaction tag for the data lines following it
 	TransactionLine
+	// ReplayLine is a line which signals the replay through a transaction
+	ReplayLine
 	// CommentLine is a comment line, will be ignored when parsing data
 	// Note: This line type will always ignore middleware
 	CommentLine
@@ -165,37 +170,6 @@ func (m *MrT) writeBytes(w io.Writer, b []byte) (err error) {
 	return
 }
 
-// peekFirstTxn will return the first transaction id within the current file
-func (m *MrT) peekFirstTxn() (txnID string, err error) {
-	if err = m.s.SeekToStart(); err != nil {
-		return
-	}
-
-	if err = m.s.ReadLines(func(buf *bytes.Buffer) (err error) {
-		var lineType byte
-		if lineType, err = buf.ReadByte(); err != nil {
-			return
-		}
-
-		if lineType != TransactionLine {
-			return
-		}
-
-		tidb, _ := getKV(buf.Bytes())
-		txnID = string(tidb)
-		return seeker.ErrEndEarly
-	}); err != nil {
-		return
-	}
-
-	if txnID == "" {
-		err = ErrNoTxn
-		return
-	}
-
-	return
-}
-
 // isInCurrent will return whether or not a transaction id is within the current file
 func (m *MrT) isInCurrent(txnID string) (ok bool) {
 	var err error
@@ -203,8 +177,14 @@ func (m *MrT) isInCurrent(txnID string) (ok bool) {
 		return
 	}
 
+	var rtid string
+	rtid, err = replayID(m.s)
+	if err == nil && rtid == txnID {
+		return true
+	}
+
 	var ptid string
-	if ptid, err = m.peekFirstTxn(); err != nil {
+	if ptid, err = peekFirstTxn(m.s); err != nil {
 		return
 	}
 
@@ -245,6 +225,15 @@ func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) error) (err error) {
 	as := seeker.New(af)
 	defer as.SetFile(nil)
 	return as.ReadLines(fn)
+}
+
+func (m *MrT) getToken() (token []byte) {
+	token = []byte(m.name)
+	if m.mw != nil {
+		token = append(token, strings.Join(m.mw.List(), ",")...)
+	}
+
+	return
 }
 
 func (m *MrT) newCommitID() (commitID []byte) {
@@ -291,22 +280,39 @@ func (m *MrT) Comment(b []byte) (err error) {
 	return m.flush()
 }
 
-// ForEach will iterate through all the file lines starting from the provided transaction id
-func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
-	fe := newForEacher(txnID, fn, m.mw, m.cor)
+// filter will iterate through filtered lines
+func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) (err error) {
+	f := newFilter(fn, filters)
+
+	if archive && !m.isInCurrent(txnID) {
+		if err = m.readArchiveLines(f.processLine); err == nil {
+			if _, err = nextTxn(m.s); err == ErrNoTxn {
+				// We do not have any new transactions after our replay id, no need to read from current
+				return nil
+			} else if err != nil {
+				return
+			}
+		} else if os.IsNotExist(err) {
+			// No archive exists, we can still pull from current though
+			err = nil
+		} else {
+			return
+		}
+	}
+
+	if err = m.s.ReadLines(f.processLine); err != nil {
+		return
+	}
+
+	return
+}
+
+// Filter will iterate through filtered lines
+func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter) (err error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 	if m.closed {
 		return errors.ErrIsClosed
-	}
-
-	if archive && !m.isInCurrent(txnID) {
-		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
-			return
-		}
-
-		fe.state = stateMatch
-		err = nil
 	}
 
 	if err = m.s.SeekToStart(); err != nil {
@@ -314,7 +320,55 @@ func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
 	}
 	defer m.s.SeekToEnd()
 
-	return m.s.ReadLines(fe.processLine)
+	return m.filter(txnID, archive, fn, filters)
+}
+
+func (m *MrT) processLine(buf *bytes.Buffer) (lineType byte, key, value []byte, err error) {
+	if lineType, err = buf.ReadByte(); err != nil {
+		// Error encountered getting line type
+		return
+	}
+
+	switch lineType {
+	case TransactionLine:
+		key, value = getKV(buf.Bytes())
+
+	case CommentLine, ReplayLine:
+		key, value = getKV(buf.Bytes())
+
+	case PutLine, DeleteLine:
+		key, value, err = getProcessedKV(buf, m.mw, m.cor)
+
+	default:
+		err = ErrInvalidLine
+	}
+
+	return
+}
+
+// ForEach will iterate through all the file lines starting from the provided transaction id
+func (m *MrT) ForEach(txnID string, archive bool, fn ForEachFn) (err error) {
+	match := NewMatch(txnID)
+	return m.Filter(txnID, archive, func(buf *bytes.Buffer) (err error) {
+		var (
+			lineType   byte
+			key, value []byte
+		)
+
+		if lineType, key, value, err = m.processLine(buf); err != nil {
+			return
+		}
+
+		return fn(lineType, key, value)
+	}, match)
+}
+
+// ForEachRaw will iterate through all the raw file lines starting from the provided transaction id
+func (m *MrT) ForEachRaw(txnID string, archive bool, fn ForEachRawFn) (err error) {
+	match := NewMatch(txnID)
+	return m.Filter(txnID, archive, func(buf *bytes.Buffer) (err error) {
+		return fn(buf.Bytes())
+	}, match)
 }
 
 // ForEachTxn will iterate through all the file transactions starting from the provided transaction id
@@ -352,8 +406,9 @@ func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error
 // Archive will archive the current data
 func (m *MrT) Archive(populate TxnFn) (err error) {
 	var (
-		af  *file.File
-		txn Txn
+		af      *file.File
+		txn     Txn
+		lastTxn string
 	)
 
 	m.mux.Lock()
@@ -362,10 +417,17 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 		return errors.ErrIsClosed
 	}
 
-	m.buf.Reset()
+	if lastTxn, err = peekLastTxn(m.s); err != nil {
+		return
+	}
 
+	m.buf.Reset()
 	txn.writeLine = m.writeLine
 	defer txn.clear()
+
+	if err = txn.writeLine(ReplayLine, []byte(lastTxn), nil); err != nil {
+		return
+	}
 
 	if err = populate(&txn); err != nil {
 		return
@@ -407,6 +469,118 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	return m.flush()
 }
 
+// GetFromRaw will get a key and value line from a raw entry
+func (m *MrT) GetFromRaw(raw []byte) (key, value []byte, err error) {
+	buf := bytes.NewBuffer(raw)
+	return getProcessedKV(buf, m.mw, m.cor)
+}
+
+func getTmp() (tmpF *os.File, name string, err error) {
+	if tmpF, err = ioutil.TempFile("", "mrT"); err != nil {
+		return
+	}
+
+	var fi os.FileInfo
+	if fi, err = tmpF.Stat(); err != nil {
+		return
+	}
+
+	name = fi.Name()
+	return
+}
+
+// Import will import a reader
+func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
+	var (
+		tmpF *os.File
+		tmpN string
+	)
+
+	if tmpF, tmpN, err = getTmp(); err != nil {
+		return
+	}
+	defer os.Remove(tmpN)
+
+	// Copy from inbound reader to temporary file
+	if _, err = io.Copy(tmpF, r); err != nil {
+		return
+	}
+
+	if _, err = tmpF.Seek(0, os.SEEK_SET); err != nil {
+		return
+	}
+
+	m.mux.Lock()
+	defer m.mux.Unlock()
+
+	// Seek to end before writing
+	if err = m.s.SeekToEnd(); err != nil {
+		return
+	}
+
+	var n int64
+	// Parse payload, check for proper token and signature
+	if _, n, err = shasher.ParseWithToken(m.getToken(), tmpF, m.f); err != nil {
+		return
+	}
+
+	if err = m.f.Sync(); err != nil {
+		return
+	}
+
+	// Seek back to before we started writing
+	if _, err = m.f.Seek(-n, os.SEEK_CUR); err != nil {
+		return
+	}
+
+	m.filter("", false, func(buf *bytes.Buffer) (err error) {
+		var (
+			lineType byte
+			key, val []byte
+		)
+
+		if lineType, key, val, err = m.processLine(buf); err != nil {
+			return
+		}
+
+		if lineType == TransactionLine || lineType == ReplayLine {
+			lastTxn = string(key)
+		}
+
+		return fn(lineType, key, val)
+	}, nil)
+
+	return
+}
+
+// Export will export from a given transaction id
+func (m *MrT) Export(txnID string, w io.Writer) (err error) {
+	var hw *shasher.HashWriter
+	if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
+		return
+	}
+
+	// If our reference transaction is empty, export the current data set
+	archive := txnID != ""
+
+	if err = m.ForEachRaw(txnID, archive, func(line []byte) (err error) {
+		if _, err = hw.Write(line); err != nil {
+			return
+		}
+
+		if _, err = hw.Write([]byte{'\n'}); err != nil {
+			return
+		}
+
+		return
+	}); err != nil {
+		return
+	}
+
+	_, err = hw.Sign()
+	return
+}
+
 // Close will close MrT
 func (m *MrT) Close() (err error) {
 	m.mux.Lock()
@@ -422,72 +596,116 @@ func (m *MrT) Close() (err error) {
 	return m.f.Close()
 }
 
-// ForEachFn is used for iterating through entries
-type ForEachFn func(lineType byte, key, value []byte) (err error)
+// peekFirstTxn will return the first transaction id within the current file
+func peekFirstTxn(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.SeekToStart(); err != nil {
+		return
+	}
 
-// ForEachTxnFn is used for iterating through transactions
-type ForEachTxnFn func(ti *TxnInfo) (err error)
-
-// TxnFn is used for transactions
-type TxnFn func(txn *Txn) error
-
-// TxnInfo is information about a transaction
-type TxnInfo struct {
-	// Transaction id
-	ID string `json:"id"`
-	// Timestamp of transaction
-	TS int64 `json:"ts"`
-	// List of actions
-	Actions []*ActionInfo `json:"actions"`
+	return nextTxn(s)
 }
 
-func newActionInfo(put bool, key, value []byte) *ActionInfo {
-	var a ActionInfo
-	a.Put = put
-	a.Key = string(key)
-	a.Value = string(value)
-	return &a
+func peekLastTxn(s *seeker.Seeker) (txnID string, err error) {
+	// Seek to the end of the file
+	if err = s.SeekToEnd(); err != nil {
+		return
+	}
+
+	return prevTxn(s)
 }
 
-// ActionInfo is information about an action
-type ActionInfo struct {
-	Put   bool   `json:"put"`
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
+func prevTxn(s *seeker.Seeker) (txnID string, err error) {
+	var lineType byte
+	for {
+		// Gets us to the beginning of the current line OR to the beginning of the previous line if
+		// we are already at the beginning of a line
+		if err = s.PrevLine(); err != nil {
+			return
+		}
 
-func getFirstCommit(buf *bytes.Buffer) (err error) {
-	if buf.Bytes()[0] == TransactionLine {
-		return seeker.ErrEndEarly
+		if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
+			if lineType, err = buf.ReadByte(); err != nil {
+				return
+			}
+
+			if lineType == TransactionLine {
+				// Transaction found!
+				tidb, _ := getKV(buf.Bytes())
+				txnID = string(tidb)
+				return
+			}
+
+			return
+		}); err != nil {
+			return
+		}
+
+		if len(txnID) > 0 {
+			break
+		}
+
+		// Gets us to the beginning of the current line
+		if err = s.PrevLine(); err != nil {
+			return
+		}
 	}
 
 	return
 }
 
-// getKV will extract the key and value from a payload
-func getKV(b []byte) (key, value []byte) {
-	// Set index at 8 to accommodate 8 bytes for key length
-	idx := uint64(8)
-	// Get key length
-	lv := binary.LittleEndian.Uint64(b[0:idx])
-	key = b[idx : lv+idx]
+func replayID(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.SeekToStart(); err != nil {
+		return
+	}
 
-	// Increment index past our key bytes
-	idx += lv
-	// Get value length
-	lv = binary.LittleEndian.Uint64(b[idx : idx+8])
-	// Increment our index past the value length
-	idx += 8
+	if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return
+		}
 
-	// Get upper range in case we need to pack in data after the value
-	value = b[idx : lv+idx]
+		if lineType != ReplayLine {
+			return ErrNoTxn
+		}
+
+		tidb, _ := getKV(buf.Bytes())
+		txnID = string(tidb)
+		return
+	}); err != nil {
+		return
+	}
+
+	// Set cursor to the beginning of the transaction line
+	s.PrevLine()
 	return
 }
 
-// getKVSafe will extract the key and value from a payload and apply copy on read
-func getKVSafe(b []byte) (key, value []byte) {
-	key, value = getKV(b)
-	key = append([]byte{}, key...)
-	value = append([]byte{}, value...)
+// nextTxn will return the next transaction id within the current file
+func nextTxn(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.ReadLines(func(buf *bytes.Buffer) (err error) {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return
+		}
+
+		if lineType != TransactionLine {
+			return
+		}
+
+		tidb, _ := getKV(buf.Bytes())
+		txnID = string(tidb)
+
+		return seeker.ErrEndEarly
+	}); err != nil {
+		return
+	}
+
+	if txnID == "" {
+		err = ErrNoTxn
+		return
+	}
+
+	// Set cursor to the beginning of the transaction line
+	s.PrevLine()
 	return
 }
