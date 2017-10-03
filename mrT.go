@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Path94/fileutils/shasher"
+	"github.com/PathDNA/fileutils/shasher"
 	"github.com/itsmontoya/async/file"
 	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
