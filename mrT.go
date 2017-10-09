@@ -579,7 +579,9 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 		return
 	}
 
-	_, err = hw.Sign()
+	if hw != nil {
+		_, err = hw.Sign()
+	}
 	return
 }
 
