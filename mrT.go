@@ -556,14 +556,16 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 // Export will export from a given transaction id
 func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 	var hw *shasher.HashWriter
-	if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
-		return
-	}
-
 	// If our reference transaction is empty, export the current data set
 	archive := txnID != ""
 
 	if err = m.ForEachRaw(txnID, archive, func(line []byte) (err error) {
+		if hw == nil {
+			if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
+				return
+			}
+		}
+
 		if _, err = hw.Write(line); err != nil {
 			return
 		}
