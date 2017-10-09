@@ -581,6 +581,8 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 
 	if hw != nil {
 		_, err = hw.Sign()
+	} else {
+		err = ErrNoTxn
 	}
 
 	return
