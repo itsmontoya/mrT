@@ -403,6 +403,17 @@ func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error
 	return
 }
 
+// LastTxn will get the last transaction id
+func (m *MrT) LastTxn() (txnID string, err error) {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+	if m.closed {
+		return "", errors.ErrIsClosed
+	}
+	defer m.s.SeekToEnd()
+	return peekLastTxn(m.s)
+}
+
 // Archive will archive the current data
 func (m *MrT) Archive(populate TxnFn) (err error) {
 	var (
