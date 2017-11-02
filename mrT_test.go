@@ -68,7 +68,7 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = testForEachTxn(m, "", 2); err != nil {
+	if err = testForEachTxn(m, "", 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,11 +79,11 @@ func TestMrT(t *testing.T) {
 		return
 	}
 
-	if err = testForEach(m, "", 4); err != nil {
+	if err = testForEach(m, "", 3); err != nil {
 		t.Fatal(err)
 	}
 
-	if err = testForEachTxn(m, "", 3); err != nil {
+	if err = testForEachTxn(m, "", 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,11 +95,11 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = testForEach(m, "", 4); err != nil {
+	if err = testForEach(m, "", 2); err != nil {
 		t.Fatal(err)
 	}
 
-	if err = testForEachTxn(m, "", 3); err != nil {
+	if err = testForEachTxn(m, "", 1); err != nil {
 		t.Fatal(err)
 	}
 
