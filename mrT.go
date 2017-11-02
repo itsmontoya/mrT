@@ -39,6 +39,8 @@ const (
 	ErrInvalidLine = errors.Error("invalid line")
 	// ErrNoTxn is returned when no transactions are available
 	ErrNoTxn = errors.Error("no transactions available")
+	// ErrInvalidTxn is returned when an invalid transaction is provided
+	ErrInvalidTxn = errors.Error("transaction does not exist")
 )
 
 var (
@@ -174,7 +176,7 @@ func (m *MrT) writeBytes(w io.Writer, b []byte) (err error) {
 func (m *MrT) isInCurrent(txnID string) (ok bool) {
 	var err error
 	if txnID == "" {
-		return
+		return true
 	}
 
 	var rtid string
@@ -283,7 +285,6 @@ func (m *MrT) Comment(b []byte) (err error) {
 // filter will iterate through filtered lines
 func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) (err error) {
 	f := newFilter(fn, filters)
-
 	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(f.processLine); err == nil {
 			if _, err = nextTxn(m.s); err == ErrNoTxn {
@@ -313,6 +314,13 @@ func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter)
 	defer m.mux.Unlock()
 	if m.closed {
 		return errors.ErrIsClosed
+	}
+
+	var ltid string
+	if ltid, err = peekLastTxn(m.s); err == nil {
+		if ltid == txnID {
+			return
+		}
 	}
 
 	if err = m.s.SeekToStart(); err != nil {
@@ -564,39 +572,93 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 	return
 }
 
+func (m *MrT) exportFresh(w io.Writer) (err error) {
+	var hw *shasher.HashWriter
+	// Ensure our seeker returns to the end of the file when we are finished
+	defer m.s.SeekToEnd()
+
+	if err = m.s.SeekToStart(); err != nil {
+		return
+	}
+
+	if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
+		return
+	}
+
+	if _, err = io.Copy(hw, m.f); err != nil {
+		return
+	}
+
+	_, err = hw.Sign()
+	return
+}
+
+func (m *MrT) exportFrom(txnID string, w io.Writer) (err error) {
+	var (
+		hw *shasher.HashWriter
+		s  *seeker.Seeker
+	)
+
+	mf := NewMatch(txnID)
+	ft := newFilter(endOnMatch, []Filter{mf})
+
+	if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
+		return
+	}
+
+	if m.isInCurrent(txnID) {
+		var ltid string
+		if ltid, err = peekLastTxn(m.s); err == nil && ltid == txnID {
+			return ErrNoTxn
+		}
+
+		s = m.s
+		// Ensure our seeker returns to the end of the file when we are finished
+		defer s.SeekToEnd()
+	} else {
+		var f *file.File
+		if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
+			return
+		}
+		// Ensure our archive file closes after we are finished
+		defer f.Close()
+		// Create a new seeker for our archive file
+		s = seeker.New(f)
+		// Remove reference to our archive file when we are finished
+		defer s.SetFile(nil)
+	}
+
+	if err = s.SeekToStart(); err != nil {
+		return
+	}
+
+	if err = s.ReadLines(ft.processLine); err != nil {
+		return
+	}
+
+	if mf.state == statePreMatch {
+		return ErrInvalidTxn
+	}
+
+	if _, err = io.Copy(hw, m.f); err != nil {
+		return
+	}
+
+	_, err = hw.Sign()
+	return
+}
+
 // Export will export from a given transaction id
 func (m *MrT) Export(txnID string, w io.Writer) (err error) {
-	var hw *shasher.HashWriter
-	// If our reference transaction is empty, export the current data set
-	archive := txnID != ""
+	m.mux.Lock()
+	defer m.mux.Unlock()
 
-	if err = m.ForEachRaw(txnID, archive, func(line []byte) (err error) {
-		if hw == nil {
-			if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
-				return
-			}
-		}
-
-		if _, err = hw.Write(line); err != nil {
-			return
-		}
-
-		if _, err = hw.Write([]byte{'\n'}); err != nil {
-			return
-		}
-
-		return
-	}); err != nil {
-		return
+	// Fast path for fresh pulls
+	if txnID == "" {
+		return m.exportFresh(w)
 	}
 
-	if hw != nil {
-		_, err = hw.Sign()
-	} else {
-		err = ErrNoTxn
-	}
-
-	return
+	return m.exportFrom(txnID, w)
 }
 
 // Close will close MrT
