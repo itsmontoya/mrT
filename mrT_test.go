@@ -68,7 +68,7 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = testForEachTxn(m, "", 2); err != nil {
+	if err = testForEachTxn(m, "", 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,11 +79,11 @@ func TestMrT(t *testing.T) {
 		return
 	}
 
-	if err = testForEach(m, "", 4); err != nil {
+	if err = testForEach(m, "", 3); err != nil {
 		t.Fatal(err)
 	}
 
-	if err = testForEachTxn(m, "", 3); err != nil {
+	if err = testForEachTxn(m, "", 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,11 +95,11 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = testForEach(m, "", 4); err != nil {
+	if err = testForEach(m, "", 2); err != nil {
 		t.Fatal(err)
 	}
 
-	if err = testForEachTxn(m, "", 3); err != nil {
+	if err = testForEachTxn(m, "", 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -120,12 +120,12 @@ func TestMrT(t *testing.T) {
 	}
 
 	// We will only expect two entries because we will pull the "current" data
-	if err = testForEach(nm, "", 2); err != nil {
+	if err = testForEach(nm, "", 4); err != nil {
 		t.Fatal(err)
 	}
 
 	// We will only expect one transaction because we will pull the "current" data
-	if err = testForEachTxn(nm, "", 1); err != nil {
+	if err = testForEachTxn(nm, "", 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +145,7 @@ func TestMrT(t *testing.T) {
 	}
 
 	// We will only expect two entries because we will pull the "current" data
-	if err = testForEach(nm, "", 3); err != nil {
+	if err = testForEach(nm, "", 5); err != nil {
 		t.Fatal(err)
 	}
 

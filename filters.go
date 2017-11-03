@@ -2,6 +2,8 @@ package mrT
 
 import (
 	"bytes"
+
+	"github.com/itsmontoya/seeker"
 )
 
 func newFilter(fn FilterFn, fs []Filter) *filter {
@@ -91,5 +93,18 @@ func (m *Match) Filter(buf *bytes.Buffer) (ok bool, err error) {
 	}
 
 	ok = m.state == statePostMatch
+	return
+}
+
+func (m *Match) breakOnMatch(buf *bytes.Buffer) (err error) {
+	var ok bool
+	if ok, err = m.Filter(buf); err != nil {
+		return
+	}
+
+	if ok {
+		return seeker.ErrEndEarly
+	}
+
 	return
 }

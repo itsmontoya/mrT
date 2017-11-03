@@ -94,3 +94,7 @@ func getLineType(buf *bytes.Buffer) (lineType byte, err error) {
 	err = buf.UnreadByte()
 	return
 }
+
+func endOnMatch(buf *bytes.Buffer) (err error) {
+	return seeker.ErrEndEarly
+}
