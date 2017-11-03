@@ -620,16 +620,6 @@ func (m *MrT) exportArchiveFrom(txnID string, mf *Match, ft *filter, hw *shasher
 	return
 }
 
-func newExporter(m *MrT, w io.Writer, txnID string) (e exporter) {
-	e.m = m
-	e.w = w
-	e.txnID = txnID
-
-	e.mf = NewMatch(txnID)
-	e.ft = newFilter(endOnMatch, []Filter{e.mf})
-	return
-}
-
 func (m *MrT) exportArchive(e *exporter) (err error) {
 	var f *file.File
 	if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {

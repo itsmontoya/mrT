@@ -8,6 +8,15 @@ import (
 	"github.com/itsmontoya/seeker"
 )
 
+func newExporter(m *MrT, w io.Writer, txnID string) (e exporter) {
+	e.m = m
+	e.w = w
+	e.txnID = txnID
+
+	e.mf = NewMatch(txnID)
+	return
+}
+
 type exporter struct {
 	txnID string
 
@@ -15,7 +24,6 @@ type exporter struct {
 	w  io.Writer
 	hw *shasher.HashWriter
 	mf *Match
-	ft *filter
 }
 
 func (e *exporter) exportFrom(f file.Interface, s *seeker.Seeker) (err error) {
