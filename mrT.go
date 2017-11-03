@@ -620,27 +620,26 @@ func (m *MrT) exportArchiveFrom(txnID string, mf *Match, ft *filter, hw *shasher
 	return
 }
 
-func (m *MrT) exportArchive(e *exporter) (err error) {
-	var f *file.File
-	if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
-		return
-	}
-	defer f.Close()
+func (m *MrT) getCurrentKey() string {
+	return path.Join(m.dir, m.name+".tdb")
+}
 
-	as := seeker.New(f)
-	err = e.exportFrom(f, as)
-	as.SetFile(nil)
-	return
+func (m *MrT) getArchiveKey() string {
+	return path.Join(m.dir, "archive", m.name+".tdb")
+}
+
+func (m *MrT) exportArchive(e *exporter) (err error) {
+	return e.exportFrom(path.Join(m.dir, "archive", m.name+".tdb"))
 }
 
 func (m *MrT) exportCurrent(e *exporter) (err error) {
-	return e.exportFrom(m.f, m.s)
+	return e.exportFrom(path.Join(m.dir, m.name+".tdb"))
 }
 
 // Export will export from a given transaction id
 func (m *MrT) Export(txnID string, w io.Writer) (err error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
+	m.mux.RLock()
+	defer m.mux.RUnlock()
 
 	e := newExporter(m, w, txnID)
 	var ltid string
@@ -650,7 +649,7 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 
 	// Fast path for fresh pulls
 	if txnID == "" || !m.isInCurrent(txnID) {
-		if err = m.exportArchive(&e); err != nil {
+		if err = e.exportFrom(m.getArchiveKey()); err != nil {
 			if err == ErrNoTxn {
 				err = ErrInvalidTxn
 			}
@@ -659,7 +658,9 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 		}
 	}
 
-	err = m.exportCurrent(&e)
+	if err = e.exportFrom(m.getCurrentKey()); err != nil && err != ErrNoTxn {
+		return
+	}
 
 	if e.hw != nil {
 		_, err = e.hw.Sign()

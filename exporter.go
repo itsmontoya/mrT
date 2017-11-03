@@ -26,7 +26,16 @@ type exporter struct {
 	mf *Match
 }
 
-func (e *exporter) exportFrom(f file.Interface, s *seeker.Seeker) (err error) {
+func (e *exporter) exportFrom(src string) (err error) {
+	var f *file.File
+	if f, err = file.Open(src); err != nil {
+		return
+	}
+	defer f.Close()
+
+	s := seeker.New(f)
+	defer s.SetFile(nil)
+
 	var ltid string
 	if ltid, err = peekLastTxn(s); err == nil && ltid == e.txnID {
 		return ErrNoTxn
@@ -39,12 +48,13 @@ func (e *exporter) exportFrom(f file.Interface, s *seeker.Seeker) (err error) {
 	if err = s.SeekToStart(); err != nil {
 		return
 	}
-
+	// Find our target transaction
 	if err = e.seekToTransaction(s); err != nil {
 		return
 	}
 
 	if e.hw == nil {
+		// Hash writer hasn't been created yet, initialized hash writer
 		if e.hw, err = shasher.NewWithToken(e.w, e.m.getToken()); err != nil {
 			return
 		}
