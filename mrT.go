@@ -593,44 +593,17 @@ func (m *MrT) exportFresh(w io.Writer) (err error) {
 	return
 }
 
-func (m *MrT) exportFrom(txnID string, w io.Writer) (err error) {
-	var (
-		hw *shasher.HashWriter
-		s  *seeker.Seeker
-	)
-
-	mf := NewMatch(txnID)
-	ft := newFilter(endOnMatch, []Filter{mf})
-
-	if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
+func (m *MrT) exportArchiveFrom(txnID string, mf *Match, ft *filter, hw *shasher.HashWriter) (err error) {
+	var f *file.File
+	if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
 		return
 	}
-
-	if m.isInCurrent(txnID) {
-		var ltid string
-		if ltid, err = peekLastTxn(m.s); err == nil && ltid == txnID {
-			return ErrNoTxn
-		}
-
-		s = m.s
-		// Ensure our seeker returns to the end of the file when we are finished
-		defer s.SeekToEnd()
-	} else {
-		var f *file.File
-		if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
-			return
-		}
-		// Ensure our archive file closes after we are finished
-		defer f.Close()
-		// Create a new seeker for our archive file
-		s = seeker.New(f)
-		// Remove reference to our archive file when we are finished
-		defer s.SetFile(nil)
-	}
-
-	if err = s.SeekToStart(); err != nil {
-		return
-	}
+	// Ensure our archive file closes after we are finished
+	defer f.Close()
+	// Create a new seeker for our archive file
+	s := seeker.New(f)
+	// Remove reference to our archive file when we are finished
+	defer s.SetFile(nil)
 
 	if err = s.ReadLines(ft.processLine); err != nil {
 		return
@@ -644,8 +617,33 @@ func (m *MrT) exportFrom(txnID string, w io.Writer) (err error) {
 		return
 	}
 
-	_, err = hw.Sign()
 	return
+}
+
+func newExporter(m *MrT, w io.Writer, txnID string) (e exporter) {
+	e.m = m
+	e.w = w
+	e.txnID = txnID
+
+	e.mf = NewMatch(txnID)
+	e.ft = newFilter(endOnMatch, []Filter{e.mf})
+	return
+}
+
+func (m *MrT) exportArchive(e *exporter) (err error) {
+	var f *file.File
+	if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
+		return
+	}
+	defer f.Close()
+
+	as := seeker.New(f)
+	defer as.SetFile(nil)
+	return e.exportFrom(f, as)
+}
+
+func (m *MrT) exportCurrent(e *exporter) (err error) {
+	return e.exportFrom(m.f, m.s)
 }
 
 // Export will export from a given transaction id
@@ -653,12 +651,30 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
-	// Fast path for fresh pulls
-	if txnID == "" {
-		return m.exportFresh(w)
+	e := newExporter(m, w, txnID)
+	var ltid string
+	if ltid, err = peekLastTxn(m.s); err == nil && ltid == txnID {
+		return ErrNoTxn
 	}
 
-	return m.exportFrom(txnID, w)
+	// Fast path for fresh pulls
+	if txnID == "" || !m.isInCurrent(txnID) {
+		if err = m.exportArchive(&e); err != nil {
+			if err == ErrNoTxn {
+				err = ErrInvalidTxn
+			}
+
+			return
+		}
+	}
+
+	err = m.exportCurrent(&e)
+
+	if e.hw != nil {
+		_, err = e.hw.Sign()
+	}
+
+	return
 }
 
 // Close will close MrT
