@@ -628,8 +628,9 @@ func (m *MrT) exportArchive(e *exporter) (err error) {
 	defer f.Close()
 
 	as := seeker.New(f)
-	defer as.SetFile(nil)
-	return e.exportFrom(f, as)
+	err = e.exportFrom(f, as)
+	as.SetFile(nil)
+	return
 }
 
 func (m *MrT) exportCurrent(e *exporter) (err error) {
