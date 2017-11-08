@@ -552,7 +552,7 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 		return
 	}
 
-	m.filter("", false, func(buf *bytes.Buffer) (err error) {
+	m.s.ReadLines(func(buf *bytes.Buffer) (err error) {
 		var (
 			lineType byte
 			key, val []byte
@@ -567,7 +567,7 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 		}
 
 		return fn(lineType, key, val)
-	}, nil)
+	})
 
 	return
 }
