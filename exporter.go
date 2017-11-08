@@ -79,6 +79,8 @@ func (e *exporter) seekToTransaction(s *seeker.Seeker) (err error) {
 		return
 	}
 
+	s.PrevLine()
+
 	if e.mf.state == statePreMatch {
 		return ErrNoTxn
 	}
