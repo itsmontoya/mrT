@@ -301,8 +301,8 @@ func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) 
 		}
 	}
 
-	if err = m.s.ReadLines(f.processLine); err != nil {
-		return
+	if err = m.s.ReadLines(f.processLine); err != nil && os.IsNotExist(err) {
+		err = nil
 	}
 
 	return
@@ -651,10 +651,12 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 	if txnID == "" || !m.isInCurrent(txnID) {
 		if err = e.exportFrom(m.getArchiveKey()); err != nil {
 			if err == ErrNoTxn {
-				err = ErrInvalidTxn
+				return ErrInvalidTxn
+			} else if os.IsNotExist(err) {
+				err = nil
+			} else {
+				return
 			}
-
-			return
 		}
 	}
 
