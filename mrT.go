@@ -55,7 +55,7 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 		return
 	}
 
-	if mrT.f, err = file.OpenFile(path.Join(dir, name+".tdb"), os.O_RDWR|os.O_CREATE, 0644); err != nil {
+	if mrT.f, err = os.OpenFile(path.Join(dir, name+".tdb"), os.O_RDWR|os.O_CREATE, 0644); err != nil {
 		return
 	}
 
@@ -89,7 +89,7 @@ type MrT struct {
 	// Copy on read
 	cor bool
 
-	f  *file.File
+	f  file.Interface
 	s  *seeker.Seeker
 	ug *uuid.Gen
 	mw *middleware.MWs
@@ -218,8 +218,8 @@ func (m *MrT) rollback() {
 }
 
 func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) error) (err error) {
-	var af *file.File
-	if af, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
+	var af file.Interface
+	if af, err = os.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
 		return
 	}
 	defer af.Close()
@@ -425,7 +425,7 @@ func (m *MrT) LastTxn() (txnID string, err error) {
 // Archive will archive the current data
 func (m *MrT) Archive(populate TxnFn) (err error) {
 	var (
-		af      *file.File
+		af      file.Interface
 		txn     Txn
 		lastTxn string
 	)
@@ -453,7 +453,7 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	}
 
 	// Open our archive file as an appending file
-	if af, err = file.OpenFile(path.Join(m.dir, "archive", m.name+".tdb"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644); err != nil {
+	if af, err = os.OpenFile(path.Join(m.dir, "archive", m.name+".tdb"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644); err != nil {
 		return
 	}
 	defer af.Close()
@@ -594,8 +594,8 @@ func (m *MrT) exportFresh(w io.Writer) (err error) {
 }
 
 func (m *MrT) exportArchiveFrom(txnID string, mf *Match, ft *filter, hw *shasher.HashWriter) (err error) {
-	var f *file.File
-	if f, err = file.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
+	var f file.Interface
+	if f, err = os.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
 		return
 	}
 	// Ensure our archive file closes after we are finished
