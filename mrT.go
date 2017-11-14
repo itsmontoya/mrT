@@ -316,10 +316,12 @@ func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter)
 		return errors.ErrIsClosed
 	}
 
-	var ltid string
-	if ltid, err = peekLastTxn(m.s); err == nil {
-		if ltid == txnID {
-			return
+	if txnID != "" {
+		var ltid string
+		if ltid, err = peekLastTxn(m.s); err == nil {
+			if ltid == txnID {
+				return
+			}
 		}
 	}
 
@@ -642,9 +644,11 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 	defer m.mux.RUnlock()
 
 	e := newExporter(m, w, txnID)
-	var ltid string
-	if ltid, err = peekLastTxn(m.s); err == nil && ltid == txnID {
-		return ErrNoTxn
+	if txnID != "" {
+		var ltid string
+		if ltid, err = peekLastTxn(m.s); err == nil && ltid == txnID {
+			return ErrNoTxn
+		}
 	}
 
 	// Fast path for fresh pulls
