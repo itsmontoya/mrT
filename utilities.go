@@ -56,16 +56,32 @@ func getFirstCommit(buf *bytes.Buffer) (err error) {
 func getKV(b []byte) (key, value []byte) {
 	// Set index at 8 to accommodate 8 bytes for key length
 	idx := uint64(8)
+	blen := uint64(len(b))
+	if blen < idx {
+		return
+	}
+
 	// Get key length
 	lv := binary.LittleEndian.Uint64(b[0:idx])
+	if blen < idx+lv {
+		return
+	}
+
 	key = b[idx : lv+idx]
 
 	// Increment index past our key bytes
 	idx += lv
+	if blen < idx {
+		return
+	}
+
 	// Get value length
 	lv = binary.LittleEndian.Uint64(b[idx : idx+8])
 	// Increment our index past the value length
 	idx += 8
+	if blen < lv+idx {
+		return
+	}
 
 	// Get upper range in case we need to pack in data after the value
 	value = b[idx : lv+idx]
