@@ -27,23 +27,28 @@ func TestMrT(t *testing.T) {
 	defer os.RemoveAll("./testing/")
 
 	if err = m.Txn(func(txn *Txn) (err error) {
-		txn.Put([]byte("greeting"), []byte("hello"))
-		txn.Put([]byte("name"), []byte("world"))
+		if err = txn.Put([]byte("greeting"), []byte("hello")); err != nil {
+			return
+		}
+
+		err = txn.Put([]byte("name"), []byte("world"))
 		return
 	}); err != nil {
-		return
+		t.Fatal(err)
 	}
 
 	if err = m.Txn(func(txn *Txn) (err error) {
-		txn.Put([]byte("name"), []byte("John Doe"))
+		err = txn.Put([]byte("name"), []byte("John Doe"))
 		return
 	}); err != nil {
-		return
-	}
-
-	if firstTxn, err = peekFirstTxn(seeker.New(m.f.Reader())); err != nil {
 		t.Fatal(err)
 	}
+
+	rdr := m.f.Reader()
+	if firstTxn, err = peekFirstTxn(seeker.New(rdr)); err != nil {
+		t.Fatal(err)
+	}
+	rdr.Close()
 
 	if err = testForEach(m, "", 3); err != nil {
 		t.Fatal(err)
@@ -160,6 +165,7 @@ func testNilForEach(lineType byte, key, value []byte) (err error) {
 
 func testForEach(m *MrT, start string, n int) (err error) {
 	var entryCount int
+	journaler.Debug("About to call ForEach!")
 	if err = m.ForEach(start, true, func(lineType byte, key []byte, value []byte) (err error) {
 		if lineType != PutLine && lineType != DeleteLine {
 			return

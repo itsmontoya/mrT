@@ -15,6 +15,7 @@ import (
 	"github.com/PathDNA/fileutils/shasher"
 	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
+	"github.com/missionMeteora/journaler"
 	"github.com/missionMeteora/toolkit/errors"
 	"github.com/missionMeteora/uuid"
 )
@@ -61,6 +62,12 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	}
 
 	mrT.f.SyncAfterWriterClose = true
+
+	if mrT.af, err = cfile.New(path.Join(dir, "archive", name+".tdb"), 0644); err != nil {
+		return
+	}
+
+	mrT.af.SyncAfterWriterClose = true
 
 	mrT.dir = dir
 	mrT.name = name
@@ -210,6 +217,7 @@ func (m *MrT) isInCurrent(txnID string) (ok bool) {
 
 func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) error) (err error) {
 	ar := m.af.Reader()
+	defer ar.Close()
 	as := seeker.New(ar)
 	defer as.SetFile(nil)
 	return as.ReadLines(fn)
@@ -293,6 +301,8 @@ func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) 
 	curR := m.f.Reader()
 	defer curR.Close()
 	s := seeker.New(curR)
+
+	journaler.Debug("Filter! %s %v", txnID, m.isInCurrent(txnID))
 
 	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(f.processLine); err == nil {
@@ -433,10 +443,7 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 			return
 		}
 
-		var txn Txn
 		lastTxn := m.ltxn.Load()
-		txn.writeLine = m.writeLine
-		defer txn.clear()
 
 		s := seeker.New(f)
 
@@ -461,6 +468,9 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 
 		// TODO: CLEAN UP THIS LOCKCEPTION
 		return m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
+			txn := newTxn(buf, m.writeLine)
+			defer txn.clear()
+
 			if err = txn.writeLine(buf, ReplayLine, []byte(lastTxn), nil); err != nil {
 				return
 			}
@@ -469,8 +479,12 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 				return
 			}
 
-			_, err = f.Write(buf.Bytes())
-			return
+			if _, err = f.Write(buf.Bytes()); err != nil {
+				return
+			}
+
+			journaler.Debug("About to sync: %s", buf.String())
+			return f.Sync()
 		})
 	}); err != nil {
 		return
