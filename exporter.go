@@ -4,7 +4,6 @@ import (
 	"io"
 
 	"github.com/PathDNA/fileutils/shasher"
-	"github.com/itsmontoya/async/file"
 	"github.com/itsmontoya/seeker"
 )
 
@@ -26,28 +25,15 @@ type exporter struct {
 	mf *Match
 }
 
-func (e *exporter) exportFrom(src string) (err error) {
-	var f *file.File
-	if f, err = file.Open(src); err != nil {
-		return
-	}
-	defer f.Close()
-
-	s := seeker.New(f)
-	defer s.SetFile(nil)
+func (e *exporter) exportFrom(rsc ReadSeekCloser) (err error) {
+	defer rsc.Close()
+	s := seeker.New(rsc)
 
 	var ltid string
 	if ltid, err = peekLastTxn(s); err == nil && ltid == e.txnID {
 		return ErrNoTxn
 	}
 
-	// Ensure our seeker returns to the end of the file when we are finished
-	defer s.SeekToEnd()
-
-	// Seek to the beginning of our file
-	if err = s.SeekToStart(); err != nil {
-		return
-	}
 	// Find our target transaction
 	if err = e.seekToTransaction(s); err != nil {
 		return
@@ -60,7 +46,7 @@ func (e *exporter) exportFrom(src string) (err error) {
 		}
 	}
 
-	if _, err = io.Copy(e.hw, f); err != nil {
+	if _, err = io.Copy(e.hw, rsc); err != nil {
 		return
 	}
 

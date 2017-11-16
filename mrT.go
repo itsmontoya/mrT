@@ -8,10 +8,11 @@ import (
 	"os"
 	"path"
 	"strings"
-	"sync"
+
+	"github.com/Path94/atoms"
+	"github.com/PathDNA/cfile"
 
 	"github.com/PathDNA/fileutils/shasher"
-	"github.com/itsmontoya/async/file"
 	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
 	"github.com/missionMeteora/toolkit/errors"
@@ -55,9 +56,11 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 		return
 	}
 
-	if mrT.f, err = os.OpenFile(path.Join(dir, name+".tdb"), os.O_RDWR|os.O_CREATE, 0644); err != nil {
+	if mrT.f, err = cfile.New(path.Join(dir, name+".tdb"), 0644); err != nil {
 		return
 	}
+
+	mrT.f.SyncAfterWriterClose = true
 
 	mrT.dir = dir
 	mrT.name = name
@@ -65,15 +68,12 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	// Create new uuid generator
 	mrT.ug = uuid.NewGen()
 	// Create new write buffer
-	mrT.buf = bytes.NewBuffer(nil)
+	mrT.lbuf = newLBuf()
+
 	// Create new seeker
-	mrT.s = seeker.New(mrT.f)
+	//	mrT.s = seeker.New(mrT.f)
 	// Set Mr.T's middleware
 	mrT.setMWs(mws)
-
-	if err = mrT.s.SeekToEnd(); err != nil {
-		return
-	}
 
 	mp = &mrT
 	return
@@ -82,22 +82,24 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 // MrT is Mister Transaction, he manages file transactions
 // He also pities a fool
 type MrT struct {
-	mux sync.RWMutex
-
 	dir  string
 	name string
 	// Copy on read
 	cor bool
 
-	f  file.Interface
-	s  *seeker.Seeker
+	// Current file
+	f *cfile.File
+	// Archive file
+	af *cfile.File
+
 	ug *uuid.Gen
 	mw *middleware.MWs
 
-	buf  *bytes.Buffer
+	lbuf *lbuf
 	nbuf [8]byte
+	ltxn atoms.String
 
-	closed bool
+	closed atoms.Bool
 }
 
 func (m *MrT) setMWs(mws []middleware.Middleware) {
@@ -117,33 +119,33 @@ func (m *MrT) isMWWrite(lineType byte) bool {
 	return lineType == PutLine || lineType == DeleteLine
 }
 
-func (m *MrT) writeLine(lineType byte, key, value []byte) (err error) {
+func (m *MrT) writeLine(buf *bytes.Buffer, lineType byte, key, value []byte) (err error) {
 	// Write line type
-	m.buf.WriteByte(lineType)
+	buf.WriteByte(lineType)
 
 	// If this is not a middleware write, use fast-path
 	if !m.isMWWrite(lineType) {
-		m.writeRawBytes(key, value)
+		m.writeRawBytes(buf, key, value)
 	} else {
-		if err = m.writeMWBytes(key, value); err != nil {
+		if err = m.writeMWBytes(buf, key, value); err != nil {
 			return
 		}
 	}
 
-	m.buf.WriteByte('\n')
+	buf.WriteByte('\n')
 	return
 }
 
-func (m *MrT) writeRawBytes(key, value []byte) (err error) {
+func (m *MrT) writeRawBytes(buf *bytes.Buffer, key, value []byte) (err error) {
 	// We don't check for errors because only middleware can cause errors
-	m.writeBytes(m.buf, key)
-	m.writeBytes(m.buf, value)
+	m.writeBytes(buf, key)
+	m.writeBytes(buf, value)
 	return
 }
 
-func (m *MrT) writeMWBytes(key, value []byte) (err error) {
+func (m *MrT) writeMWBytes(buf *bytes.Buffer, key, value []byte) (err error) {
 	var w *middleware.Writer
-	if w, err = m.mw.Writer(m.buf); err != nil {
+	if w, err = m.mw.Writer(buf); err != nil {
 		return
 	}
 	defer w.Close()
@@ -179,14 +181,18 @@ func (m *MrT) isInCurrent(txnID string) (ok bool) {
 		return true
 	}
 
+	rdr := m.f.Reader()
+	defer rdr.Close()
+	s := seeker.New(rdr)
+
 	var rtid string
-	rtid, err = replayID(m.s)
+	rtid, err = replayID(s)
 	if err == nil && rtid == txnID {
 		return true
 	}
 
 	var ptid string
-	if ptid, err = peekFirstTxn(m.s); err != nil {
+	if ptid, err = peekFirstTxn(s); err != nil {
 		return
 	}
 
@@ -202,29 +208,9 @@ func (m *MrT) isInCurrent(txnID string) (ok bool) {
 	return ru.Time().UnixNano() >= pu.Time().UnixNano()
 }
 
-func (m *MrT) flush() (err error) {
-	// Ensure we are at the end before flushing
-	if err = m.s.SeekToEnd(); err != nil {
-		return
-	}
-
-	_, err = io.Copy(m.f, m.buf)
-	m.buf.Reset()
-	return
-}
-
-func (m *MrT) rollback() {
-	m.buf.Reset()
-}
-
 func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) error) (err error) {
-	var af file.Interface
-	if af, err = os.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
-		return
-	}
-	defer af.Close()
-
-	as := seeker.New(af)
+	ar := m.af.Reader()
+	as := seeker.New(ar)
 	defer as.SetFile(nil)
 	return as.ReadLines(fn)
 }
@@ -238,56 +224,79 @@ func (m *MrT) getToken() (token []byte) {
 	return
 }
 
-func (m *MrT) newCommitID() (commitID []byte) {
-	return []byte(m.ug.New().String())
+func (m *MrT) newTxnID() string {
+	return m.ug.New().String()
 }
 
 // Txn will create a transaction
 func (m *MrT) Txn(fn TxnFn) (err error) {
-	var txn Txn
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
+	// Get a new appender
+	a := m.f.Appender()
+	// Defer closing the appender
+	defer a.Close()
+	// Check is MrT is closed
+	if m.closed.Get() {
 		return errors.ErrIsClosed
 	}
+	// Assign a new transaction id
+	txnID := m.newTxnID()
+	// Lock buffer to write to and flush
+	if err = m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
+		txn := newTxn(buf, m.writeLine)
+		defer txn.clear()
 
-	txn.writeLine = m.writeLine
-	defer txn.clear()
+		if err = m.writeLine(buf, TransactionLine, []byte(txnID), nil); err != nil {
+			return
+		}
 
-	if err = m.writeLine(TransactionLine, m.newCommitID(), nil); err != nil {
+		if err = fn(&txn); err != nil {
+			// We encountered an error while calling func, avoid writing
+			return
+		}
+
+		_, err = a.Write(buf.Bytes())
+		return
+	}); err != nil {
 		return
 	}
 
-	if err = fn(&txn); err != nil {
-		m.rollback()
+	if err = a.Sync(); err != nil {
 		return
 	}
 
-	return m.flush()
+	m.ltxn.Store(txnID)
+	return
 }
 
 // Comment will write a comment line
 func (m *MrT) Comment(b []byte) (err error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
+	a := m.f.Appender()
+	defer a.Close()
+	if m.closed.Get() {
 		return errors.ErrIsClosed
 	}
 
-	// Write the comment line
-	if err = m.writeLine(CommentLine, b, nil); err != nil {
-		return
-	}
+	return m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
+		// Write the comment line
+		if err = m.writeLine(buf, CommentLine, b, nil); err != nil {
+			return
+		}
 
-	return m.flush()
+		_, err = a.Write(buf.Bytes())
+		return
+	})
 }
 
 // filter will iterate through filtered lines
 func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) (err error) {
 	f := newFilter(fn, filters)
+	curR := m.f.Reader()
+	defer curR.Close()
+	s := seeker.New(curR)
+
 	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(f.processLine); err == nil {
-			if _, err = nextTxn(m.s); err == ErrNoTxn {
+			if _, err = nextTxn(s); err == ErrNoTxn {
 				// We do not have any new transactions after our replay id, no need to read from current
 				return nil
 			} else if err != nil {
@@ -301,7 +310,7 @@ func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) 
 		}
 	}
 
-	if err = m.s.ReadLines(f.processLine); err != nil && os.IsNotExist(err) {
+	if err = s.ReadLines(f.processLine); err != nil && os.IsNotExist(err) {
 		err = nil
 	}
 
@@ -310,25 +319,13 @@ func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) 
 
 // Filter will iterate through filtered lines
 func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter) (err error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
+	if m.closed.Get() {
 		return errors.ErrIsClosed
 	}
 
-	if txnID != "" {
-		var ltid string
-		if ltid, err = peekLastTxn(m.s); err == nil {
-			if ltid == txnID {
-				return
-			}
-		}
-	}
-
-	if err = m.s.SeekToStart(); err != nil {
+	if txnID != "" && txnID == m.ltxn.Load() {
 		return
 	}
-	defer m.s.SeekToEnd()
 
 	return m.filter(txnID, archive, fn, filters)
 }
@@ -384,16 +381,13 @@ func (m *MrT) ForEachRaw(txnID string, archive bool, fn ForEachRawFn) (err error
 // ForEachTxn will iterate through all the file transactions starting from the provided transaction id
 func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error) {
 	fe := newTxnForEacher(txnID, fn, m.mw)
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
+	if m.closed.Get() {
 		return errors.ErrIsClosed
 	}
 
-	if err = m.s.SeekToStart(); err != nil {
-		return
-	}
-	defer m.s.SeekToEnd()
+	rdr := m.f.Reader()
+	defer rdr.Close()
+	s := seeker.New(rdr)
 
 	if archive && !m.isInCurrent(txnID) {
 		if err = m.readArchiveLines(fe.processLine); err != nil && !os.IsNotExist(err) {
@@ -405,7 +399,7 @@ func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error
 		err = nil
 	}
 
-	if err = m.s.ReadLines(fe.processLine); err != nil {
+	if err = s.ReadLines(fe.processLine); err != nil {
 		return
 	}
 
@@ -415,79 +409,74 @@ func (m *MrT) ForEachTxn(txnID string, archive bool, fn ForEachTxnFn) (err error
 
 // LastTxn will get the last transaction id
 func (m *MrT) LastTxn() (txnID string, err error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
-		return "", errors.ErrIsClosed
+	if m.closed.Get() {
+		err = errors.ErrIsClosed
+		return
 	}
-	defer m.s.SeekToEnd()
-	return peekLastTxn(m.s)
+
+	txnID = m.ltxn.Load()
+	return
 }
 
 // Archive will archive the current data
 func (m *MrT) Archive(populate TxnFn) (err error) {
-	var (
-		af      file.Interface
-		txn     Txn
-		lastTxn string
-	)
+	if err = m.f.With(func(f *os.File) (err error) {
+		if m.closed.Get() {
+			return errors.ErrIsClosed
+		}
 
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
-		return errors.ErrIsClosed
-	}
+		aw := m.af.Writer()
+		defer aw.Close()
 
-	if lastTxn, err = peekLastTxn(m.s); err != nil {
+		// Ensure archive file is at the end
+		if _, err = aw.Seek(0, os.SEEK_END); err != nil {
+			return
+		}
+
+		var txn Txn
+		lastTxn := m.ltxn.Load()
+		txn.writeLine = m.writeLine
+		defer txn.clear()
+
+		s := seeker.New(f)
+
+		// Get the first commit
+		if err = s.ReadLines(getFirstCommit); err != nil {
+			return
+		}
+
+		// Move back a line so we can include the first commit
+		if err = s.PrevLine(); err != nil {
+			return
+		}
+
+		if _, err = io.Copy(aw, f); err != nil {
+			return
+		}
+
+		// AT END
+		if err = f.Truncate(0); err != nil {
+			return
+		}
+
+		// TODO: CLEAN UP THIS LOCKCEPTION
+		return m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
+			if err = txn.writeLine(buf, ReplayLine, []byte(lastTxn), nil); err != nil {
+				return
+			}
+
+			if err = populate(&txn); err != nil {
+				return
+			}
+
+			_, err = f.Write(buf.Bytes())
+			return
+		})
+	}); err != nil {
 		return
 	}
 
-	m.buf.Reset()
-	txn.writeLine = m.writeLine
-	defer txn.clear()
-
-	if err = txn.writeLine(ReplayLine, []byte(lastTxn), nil); err != nil {
-		return
-	}
-
-	if err = populate(&txn); err != nil {
-		return
-	}
-
-	// Open our archive file as an appending file
-	if af, err = os.OpenFile(path.Join(m.dir, "archive", m.name+".tdb"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644); err != nil {
-		return
-	}
-	defer af.Close()
-
-	if err = m.s.SeekToStart(); err != nil {
-		return
-	}
-
-	// Get the first commit
-	if err = m.s.ReadLines(getFirstCommit); err != nil {
-		return
-	}
-
-	// Move back a line so we can include the first commit
-	if err = m.s.PrevLine(); err != nil {
-		return
-	}
-
-	if _, err = io.Copy(af, m.f); err != nil {
-		return
-	}
-
-	if err = m.f.Close(); err != nil {
-		return
-	}
-
-	if m.f, err = file.Create(path.Join(m.dir, m.name+".tdb")); err != nil {
-		return
-	}
-	m.s.SetFile(m.f)
-
-	return m.flush()
+	return
 }
 
 // GetFromRaw will get a key and value line from a raw entry
@@ -510,6 +499,38 @@ func getTmp() (tmpF *os.File, name string, err error) {
 	return
 }
 
+func (m *MrT) parseImportPayload(w *os.File, r io.Reader) (err error) {
+	if _, err = io.Copy(w, r); err != nil {
+		return
+	}
+
+	var n int64
+	// Parse payload, check for proper token and signature
+	if _, n, err = shasher.ParseWithToken(m.getToken(), w, w); err != nil {
+		return
+	}
+
+	if err = w.Truncate(n); err != nil {
+		return
+	}
+
+	_, err = w.Seek(0, os.SEEK_SET)
+	return
+}
+
+func (m *MrT) appendImportPayload(f *os.File) (err error) {
+	// Acquire an appender
+	a := m.f.Appender()
+	defer a.Close()
+	// Copy payload to appender
+	if _, err = io.Copy(a, f); err != nil {
+		return
+	}
+	// Reset position before being used again
+	_, err = f.Seek(0, os.SEEK_SET)
+	return
+}
+
 // Import will import a reader
 func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 	var (
@@ -522,39 +543,16 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 	}
 	defer os.Remove(tmpN)
 
-	// Copy from inbound reader to temporary file
-	if _, err = io.Copy(tmpF, r); err != nil {
+	if err = m.parseImportPayload(tmpF, r); err != nil {
 		return
 	}
 
-	if _, err = tmpF.Seek(0, os.SEEK_SET); err != nil {
+	if err = m.appendImportPayload(tmpF); err != nil {
 		return
 	}
 
-	m.mux.Lock()
-	defer m.mux.Unlock()
-
-	// Seek to end before writing
-	if err = m.s.SeekToEnd(); err != nil {
-		return
-	}
-
-	var n int64
-	// Parse payload, check for proper token and signature
-	if _, n, err = shasher.ParseWithToken(m.getToken(), tmpF, m.f); err != nil {
-		return
-	}
-
-	if err = m.f.Sync(); err != nil {
-		return
-	}
-
-	// Seek back to before we started writing
-	if _, err = m.f.Seek(-n, os.SEEK_CUR); err != nil {
-		return
-	}
-
-	m.s.ReadLines(func(buf *bytes.Buffer) (err error) {
+	s := seeker.New(tmpF)
+	err = s.ReadLines(func(buf *bytes.Buffer) (err error) {
 		var (
 			lineType byte
 			key, val []byte
@@ -574,54 +572,6 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 	return
 }
 
-func (m *MrT) exportFresh(w io.Writer) (err error) {
-	var hw *shasher.HashWriter
-	// Ensure our seeker returns to the end of the file when we are finished
-	defer m.s.SeekToEnd()
-
-	if err = m.s.SeekToStart(); err != nil {
-		return
-	}
-
-	if hw, err = shasher.NewWithToken(w, m.getToken()); err != nil {
-		return
-	}
-
-	if _, err = io.Copy(hw, m.f); err != nil {
-		return
-	}
-
-	_, err = hw.Sign()
-	return
-}
-
-func (m *MrT) exportArchiveFrom(txnID string, mf *Match, ft *filter, hw *shasher.HashWriter) (err error) {
-	var f file.Interface
-	if f, err = os.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
-		return
-	}
-	// Ensure our archive file closes after we are finished
-	defer f.Close()
-	// Create a new seeker for our archive file
-	s := seeker.New(f)
-	// Remove reference to our archive file when we are finished
-	defer s.SetFile(nil)
-
-	if err = s.ReadLines(ft.processLine); err != nil {
-		return
-	}
-
-	if mf.state == statePreMatch {
-		return ErrInvalidTxn
-	}
-
-	if _, err = io.Copy(hw, m.f); err != nil {
-		return
-	}
-
-	return
-}
-
 func (m *MrT) getCurrentKey() string {
 	return path.Join(m.dir, m.name+".tdb")
 }
@@ -631,40 +581,40 @@ func (m *MrT) getArchiveKey() string {
 }
 
 func (m *MrT) exportArchive(e *exporter) (err error) {
-	return e.exportFrom(path.Join(m.dir, "archive", m.name+".tdb"))
-}
+	var af *os.File
+	if af, err = os.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
+		return
+	}
 
-func (m *MrT) exportCurrent(e *exporter) (err error) {
-	return e.exportFrom(path.Join(m.dir, m.name+".tdb"))
+	err = e.exportFrom(af)
+	switch {
+	case err == ErrNoTxn:
+		err = ErrInvalidTxn
+	case os.IsNotExist(err):
+		err = nil
+	}
+
+	return
 }
 
 // Export will export from a given transaction id
 func (m *MrT) Export(txnID string, w io.Writer) (err error) {
-	m.mux.RLock()
-	defer m.mux.RUnlock()
+	if txnID != "" && txnID == m.ltxn.Load() {
+		return ErrNoTxn
+	}
 
 	e := newExporter(m, w, txnID)
-	if txnID != "" {
-		var ltid string
-		if ltid, err = peekLastTxn(m.s); err == nil && ltid == txnID {
-			return ErrNoTxn
-		}
-	}
+	// Assign current reader to aquire read-lock for file
+	cr := m.f.Reader()
+	defer cr.Close()
 
-	// Fast path for fresh pulls
 	if txnID == "" || !m.isInCurrent(txnID) {
-		if err = e.exportFrom(m.getArchiveKey()); err != nil {
-			if err == ErrNoTxn {
-				return ErrInvalidTxn
-			} else if os.IsNotExist(err) {
-				err = nil
-			} else {
-				return
-			}
+		if err = m.exportArchive(&e); err != nil {
+			return
 		}
 	}
 
-	if err = e.exportFrom(m.getCurrentKey()); err != nil && err != ErrNoTxn {
+	if err = e.exportFrom(cr); err != nil {
 		return
 	}
 
@@ -677,17 +627,20 @@ func (m *MrT) Export(txnID string, w io.Writer) (err error) {
 
 // Close will close MrT
 func (m *MrT) Close() (err error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	if m.closed {
+	if !m.closed.Set(true) {
 		return errors.ErrIsClosed
 	}
 
-	m.closed = true
-	m.buf = nil
-	m.s = nil
+	// Acquire writers to ensure locks have completed
+	m.f.Writer().Close()
+	m.af.Writer().Close()
+
+	m.lbuf = nil
 	m.ug = nil
-	return m.f.Close()
+	var errs errors.ErrorList
+	errs.Push(m.f.Close())
+	errs.Push(m.af.Close())
+	return errs.Err()
 }
 
 // peekFirstTxn will return the first transaction id within the current file
@@ -802,4 +755,11 @@ func nextTxn(s *seeker.Seeker) (txnID string, err error) {
 	// Set cursor to the beginning of the transaction line
 	s.PrevLine()
 	return
+}
+
+// ReadSeekCloser incorporates reader, seeker, and closer interfaces
+type ReadSeekCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
 }

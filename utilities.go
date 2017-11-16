@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 
+	"github.com/Path94/atoms"
 	"github.com/itsmontoya/seeker"
 )
 
@@ -113,4 +114,24 @@ func getLineType(buf *bytes.Buffer) (lineType byte, err error) {
 
 func endOnMatch(buf *bytes.Buffer) (err error) {
 	return seeker.ErrEndEarly
+}
+
+func newLBuf() *lbuf {
+	var l lbuf
+	l.buf = bytes.NewBuffer(nil)
+	return &l
+}
+
+type lbuf struct {
+	mux atoms.Mux
+	buf *bytes.Buffer
+}
+
+func (l *lbuf) Update(fn func(*bytes.Buffer) error) (err error) {
+	l.mux.Update(func() {
+		err = fn(l.buf)
+		l.buf.Reset()
+	})
+
+	return
 }

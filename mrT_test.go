@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/itsmontoya/seeker"
 	"github.com/missionMeteora/journaler"
 )
 
@@ -40,7 +41,7 @@ func TestMrT(t *testing.T) {
 		return
 	}
 
-	if firstTxn, err = peekFirstTxn(m.s); err != nil {
+	if firstTxn, err = peekFirstTxn(seeker.New(m.f.Reader())); err != nil {
 		t.Fatal(err)
 	}
 
