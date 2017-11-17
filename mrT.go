@@ -354,6 +354,59 @@ func (m *MrT) exportArchive(e *exporter) (err error) {
 	return
 }
 
+
+
+func (m *MrT) archive(f *os.File, populate TxnFn) (err error) {
+	if m.closed.Get() {
+		return errors.ErrIsClosed
+	}
+	// Acquire an archive writer
+	aw := m.af.Writer()
+	// Defer the closure of our archive writer
+	defer aw.Close()
+	// Ensure archive file is at the end
+	if _, err = aw.Seek(0, io.SeekEnd); err != nil {
+		return
+	}
+	// Seek to the first transaction within our file
+	// Note: Replay lines do not count as a transaction, this will move to the first txn AFTER the replay line (if it exists)
+	if err = seekFirstTxn(f); err != nil {
+		return
+	}
+	// Copy from file to archive writer
+	if _, err = io.Copy(aw, f); err != nil {
+		return
+	}
+	// Clear file
+	if err = clearFile(f); err != nil {
+		return
+	}
+	// Write replay line to file
+	return m.lbuf.Update(func(buf *bytes.Buffer) error {
+		return m.writeReplay(f, buf, populate)
+	})
+}
+
+func (m *MrT) writeReplay(f *os.File, buf *bytes.Buffer, populate TxnFn) (err error) {
+	txn := newTxn(buf, m.writeLine)
+	defer txn.clear()
+
+	if err = txn.writeLine(buf, ReplayLine, []byte(m.ltxn.Load()), nil); err != nil {
+		return
+	}
+
+	if err = populate(&txn); err != nil {
+		return
+	}
+
+	if _, err = f.Write(buf.Bytes()); err != nil {
+		return
+	}
+
+	return f.Sync()
+}
+
+
 // Txn will create a transaction
 func (m *MrT) Txn(fn TxnFn) (err error) {
 	// Get a new appender
@@ -496,56 +549,6 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 	return m.f.With(func(f *os.File) (err error) {
 		return m.archive(f, populate)
 	})
-}
-
-func (m *MrT) archive(f *os.File, populate TxnFn) (err error) {
-	if m.closed.Get() {
-		return errors.ErrIsClosed
-	}
-	// Acquire an archive writer
-	aw := m.af.Writer()
-	// Defer the closure of our archive writer
-	defer aw.Close()
-	// Ensure archive file is at the end
-	if _, err = aw.Seek(0, io.SeekEnd); err != nil {
-		return
-	}
-	// Seek to the first transaction within our file
-	// Note: Replay lines do not count as a transaction, this will move to the first txn AFTER the replay line (if it exists)
-	if err = seekFirstTxn(f); err != nil {
-		return
-	}
-	// Copy from file to archive writer
-	if _, err = io.Copy(aw, f); err != nil {
-		return
-	}
-	// Clear file
-	if err = clearFile(f); err != nil {
-		return
-	}
-	// Write replay line to file
-	return m.lbuf.Update(func(buf *bytes.Buffer) error {
-		return m.writeReplay(f, buf, populate)
-	})
-}
-
-func (m *MrT) writeReplay(f *os.File, buf *bytes.Buffer, populate TxnFn) (err error) {
-	txn := newTxn(buf, m.writeLine)
-	defer txn.clear()
-
-	if err = txn.writeLine(buf, ReplayLine, []byte(m.ltxn.Load()), nil); err != nil {
-		return
-	}
-
-	if err = populate(&txn); err != nil {
-		return
-	}
-
-	if _, err = f.Write(buf.Bytes()); err != nil {
-		return
-	}
-
-	return f.Sync()
 }
 
 // GetFromRaw will get a key and value line from a raw entry
