@@ -72,8 +72,6 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 
 	// Create new uuid generator
 	mrT.ug = uuid.NewGen()
-	// Create new write buffer
-	mrT.lbuf = newLBuf()
 
 	// Create new seeker
 	//	mrT.s = seeker.New(mrT.f)
@@ -111,7 +109,7 @@ type MrT struct {
 	ug *uuid.Gen
 	mw *middleware.MWs
 
-	lbuf *lbuf
+	lbuf lbuf
 	nbuf [8]byte
 	ltxn atoms.String
 
@@ -650,7 +648,6 @@ func (m *MrT) Close() (err error) {
 	errs.Push(m.f.Close())
 	errs.Push(m.af.Close())
 
-	m.lbuf = nil
 	m.ug = nil
 	return errs.Err()
 }

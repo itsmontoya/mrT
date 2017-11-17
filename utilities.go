@@ -119,20 +119,14 @@ func endOnMatch(buf *bytes.Buffer) (err error) {
 	return seeker.ErrEndEarly
 }
 
-func newLBuf() *lbuf {
-	var l lbuf
-	l.buf = bytes.NewBuffer(nil)
-	return &l
-}
-
 type lbuf struct {
 	mux atoms.Mux
-	buf *bytes.Buffer
+	buf bytes.Buffer
 }
 
 func (l *lbuf) Update(fn func(*bytes.Buffer) error) (err error) {
 	l.mux.Update(func() {
-		err = fn(l.buf)
+		err = fn(&l.buf)
 		l.buf.Reset()
 	})
 
