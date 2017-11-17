@@ -314,7 +314,7 @@ func (m *MrT) parseImportPayload(w *os.File, r io.Reader) (err error) {
 		return
 	}
 
-	if _, err = tmpF.Seek(0, os.SEEK_SET); err != nil {
+	if _, err = tmpF.Seek(0, io.SeekStart); err != nil {
 		return
 	}
 
@@ -323,7 +323,7 @@ func (m *MrT) parseImportPayload(w *os.File, r io.Reader) (err error) {
 		return
 	}
 
-	_, err = w.Seek(0, os.SEEK_SET)
+	_, err = w.Seek(0, io.SeekStart)
 	return
 }
 
@@ -336,7 +336,7 @@ func (m *MrT) appendImportPayload(f *os.File) (err error) {
 		return
 	}
 	// Reset position before being used again
-	_, err = f.Seek(0, os.SEEK_SET)
+	_, err = f.Seek(0, io.SeekStart)
 	return
 }
 
@@ -503,13 +503,13 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 		defer aw.Close()
 
 		// Ensure archive file is at the end
-		if _, err = aw.Seek(0, os.SEEK_END); err != nil {
+		if _, err = aw.Seek(0, io.SeekEnd); err != nil {
 			return
 		}
 
 		lastTxn := m.ltxn.Load()
 
-		f.Seek(0, os.SEEK_SET)
+		f.Seek(0, io.SeekStart)
 		s := seeker.New(f)
 
 		// Get the first commit
@@ -531,7 +531,7 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 			return
 		}
 
-		if _, err = f.Seek(0, os.SEEK_SET); err != nil {
+		if _, err = f.Seek(0, io.SeekStart); err != nil {
 			return
 		}
 
