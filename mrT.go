@@ -228,7 +228,6 @@ func (m *MrT) readArchiveLines(fn func(*bytes.Buffer) error) (err error) {
 	ar := m.af.Reader()
 	defer ar.Close()
 	as := seeker.New(ar)
-	defer as.SetFile(nil)
 	return as.ReadLines(fn)
 }
 
