@@ -78,17 +78,7 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	// Set Mr.T's middleware
 	mrT.setMWs(mws)
 	// Set last transaction
-	if err = mrT.ForEach("", false, func(lt byte, key, val []byte) (err error) {
-		if lt != TransactionLine {
-			return
-		}
-
-		mrT.ltxn.Store(string(key))
-		return
-	}); err != nil {
-		return
-	}
-
+	mrT.setLastTxn()
 	mp = &mrT
 	return
 }
@@ -123,6 +113,18 @@ func (m *MrT) setMWs(mws []middleware.Middleware) {
 
 	m.mw = middleware.NewMWs(mws...)
 	return
+}
+
+func (m *MrT) setLastTxn() (err error) {
+	// Set last transaction
+	return m.ForEach("", false, func(lt byte, key, val []byte) (err error) {
+		if lt != TransactionLine {
+			return
+		}
+
+		m.ltxn.Store(string(key))
+		return
+	})
 }
 
 func (m *MrT) isMWWrite(lineType byte) bool {
