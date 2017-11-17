@@ -3,7 +3,11 @@ package mrT
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
+	"io/ioutil"
+	"os"
 
+	"github.com/Path94/atoms"
 	"github.com/itsmontoya/seeker"
 )
 
@@ -44,7 +48,7 @@ type ActionInfo struct {
 	Value string `json:"value"`
 }
 
-func getFirstCommit(buf *bytes.Buffer) (err error) {
+func getFirstTxn(buf *bytes.Buffer) (err error) {
 	if buf.Bytes()[0] == TransactionLine {
 		return seeker.ErrEndEarly
 	}
@@ -113,4 +117,173 @@ func getLineType(buf *bytes.Buffer) (lineType byte, err error) {
 
 func endOnMatch(buf *bytes.Buffer) (err error) {
 	return seeker.ErrEndEarly
+}
+
+type lbuf struct {
+	mux atoms.Mux
+	buf bytes.Buffer
+}
+
+func (l *lbuf) Update(fn func(*bytes.Buffer) error) (err error) {
+	l.mux.Update(func() {
+		err = fn(&l.buf)
+		l.buf.Reset()
+	})
+
+	return
+}
+
+func seekFirstTxn(f *os.File) (err error) {
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+
+	s := seeker.New(f)
+
+	// Get the first transaction
+	if err = s.ReadLines(getFirstTxn); err != nil {
+		return
+	}
+
+	// Move back a line so we can include the first transaction
+	return s.PrevLine()
+}
+
+// peekFirstTxn will return the first transaction id within the current file
+func peekFirstTxn(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.SeekToStart(); err != nil {
+		return
+	}
+
+	return nextTxn(s)
+}
+
+func peekLastTxn(s *seeker.Seeker) (txnID string, err error) {
+	// Seek to the end of the file
+	if err = s.SeekToEnd(); err != nil {
+		return
+	}
+
+	return prevTxn(s)
+}
+
+func prevTxn(s *seeker.Seeker) (txnID string, err error) {
+	var lineType byte
+	for {
+		// Gets us to the beginning of the current line OR to the beginning of the previous line if
+		// we are already at the beginning of a line
+		if err = s.PrevLine(); err != nil {
+			return
+		}
+
+		if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
+			if lineType, err = buf.ReadByte(); err != nil {
+				return
+			}
+
+			if lineType == TransactionLine {
+				// Transaction found!
+				tidb, _ := getKV(buf.Bytes())
+				txnID = string(tidb)
+				return
+			}
+
+			return
+		}); err != nil {
+			return
+		}
+
+		if len(txnID) > 0 {
+			break
+		}
+
+		// Gets us to the beginning of the current line
+		if err = s.PrevLine(); err != nil {
+			return
+		}
+	}
+
+	return
+}
+
+// nextTxn will return the next transaction id within the current file
+func nextTxn(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.ReadLines(func(buf *bytes.Buffer) (err error) {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return
+		}
+
+		if lineType != TransactionLine {
+			return
+		}
+
+		tidb, _ := getKV(buf.Bytes())
+		txnID = string(tidb)
+
+		return seeker.ErrEndEarly
+	}); err != nil {
+		return
+	}
+
+	if txnID == "" {
+		err = ErrNoTxn
+		return
+	}
+
+	// Set cursor to the beginning of the transaction line
+	s.PrevLine()
+	return
+}
+
+func replayID(s *seeker.Seeker) (txnID string, err error) {
+	if err = s.SeekToStart(); err != nil {
+		return
+	}
+
+	if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
+		var lineType byte
+		if lineType, err = buf.ReadByte(); err != nil {
+			return
+		}
+
+		if lineType != ReplayLine {
+			return ErrNoTxn
+		}
+
+		tidb, _ := getKV(buf.Bytes())
+		txnID = string(tidb)
+		return
+	}); err != nil {
+		return
+	}
+
+	// Set cursor to the beginning of the transaction line
+	s.PrevLine()
+	return
+}
+
+func getTmp() (tmpF *os.File, name string, err error) {
+	if tmpF, err = ioutil.TempFile("", "mrT"); err != nil {
+		return
+	}
+
+	name = tmpF.Name()
+	return
+}
+
+func clearFile(f *os.File) (err error) {
+	if err = f.Truncate(0); err != nil {
+		return
+	}
+
+	_, err = f.Seek(0, io.SeekStart)
+	return
+}
+
+// ReadSeekCloser incorporates reader, seeker, and closer interfaces
+type ReadSeekCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
 }

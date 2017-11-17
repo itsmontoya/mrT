@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/itsmontoya/seeker"
 	"github.com/missionMeteora/journaler"
 )
 
@@ -26,23 +27,28 @@ func TestMrT(t *testing.T) {
 	defer os.RemoveAll("./testing/")
 
 	if err = m.Txn(func(txn *Txn) (err error) {
-		txn.Put([]byte("greeting"), []byte("hello"))
-		txn.Put([]byte("name"), []byte("world"))
+		if err = txn.Put([]byte("greeting"), []byte("hello")); err != nil {
+			return
+		}
+
+		err = txn.Put([]byte("name"), []byte("world"))
 		return
 	}); err != nil {
-		return
+		t.Fatal(err)
 	}
 
 	if err = m.Txn(func(txn *Txn) (err error) {
-		txn.Put([]byte("name"), []byte("John Doe"))
+		err = txn.Put([]byte("name"), []byte("John Doe"))
 		return
 	}); err != nil {
-		return
-	}
-
-	if firstTxn, err = peekFirstTxn(m.s); err != nil {
 		t.Fatal(err)
 	}
+
+	rdr := m.f.Reader()
+	if firstTxn, err = peekFirstTxn(seeker.New(rdr)); err != nil {
+		t.Fatal(err)
+	}
+	rdr.Close()
 
 	if err = testForEach(m, "", 3); err != nil {
 		t.Fatal(err)
@@ -119,12 +125,10 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// We will only expect two entries because we will pull the "current" data
 	if err = testForEach(nm, "", 4); err != nil {
 		t.Fatal(err)
 	}
 
-	// We will only expect one transaction because we will pull the "current" data
 	if err = testForEachTxn(nm, "", 3); err != nil {
 		t.Fatal(err)
 	}
