@@ -125,12 +125,10 @@ func TestMrT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// We will only expect two entries because we will pull the "current" data
 	if err = testForEach(nm, "", 4); err != nil {
 		t.Fatal(err)
 	}
 
-	// We will only expect one transaction because we will pull the "current" data
 	if err = testForEachTxn(nm, "", 3); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +163,6 @@ func testNilForEach(lineType byte, key, value []byte) (err error) {
 
 func testForEach(m *MrT, start string, n int) (err error) {
 	var entryCount int
-	journaler.Debug("About to call ForEach!")
 	if err = m.ForEach(start, true, func(lineType byte, key []byte, value []byte) (err error) {
 		if lineType != PutLine && lineType != DeleteLine {
 			return

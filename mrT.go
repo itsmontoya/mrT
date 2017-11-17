@@ -4,18 +4,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
 
 	"github.com/Path94/atoms"
 	"github.com/PathDNA/cfile"
-
 	"github.com/PathDNA/fileutils/shasher"
+
 	"github.com/itsmontoya/middleware"
 	"github.com/itsmontoya/seeker"
-	"github.com/missionMeteora/journaler"
 	"github.com/missionMeteora/toolkit/errors"
 	"github.com/missionMeteora/uuid"
 )
@@ -81,6 +79,17 @@ func New(dir, name string, mws ...middleware.Middleware) (mp *MrT, err error) {
 	//	mrT.s = seeker.New(mrT.f)
 	// Set Mr.T's middleware
 	mrT.setMWs(mws)
+	// Set last transaction
+	if err = mrT.ForEach("", false, func(lt byte, key, val []byte) (err error) {
+		if lt != TransactionLine {
+			return
+		}
+
+		mrT.ltxn.Store(string(key))
+		return
+	}); err != nil {
+		return
+	}
 
 	mp = &mrT
 	return
@@ -236,6 +245,116 @@ func (m *MrT) newTxnID() string {
 	return m.ug.New().String()
 }
 
+// filter will iterate through filtered lines
+func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) (err error) {
+	f := newFilter(fn, filters)
+	curR := m.f.Reader()
+	defer curR.Close()
+	s := seeker.New(curR)
+
+	if archive && !m.isInCurrent(txnID) {
+		if err = m.readArchiveLines(f.processLine); err == nil {
+			if _, err = nextTxn(s); err == ErrNoTxn {
+				// We do not have any new transactions after our replay id, no need to read from current
+				return nil
+			} else if err != nil {
+				return
+			}
+		} else if os.IsNotExist(err) {
+			// No archive exists, we can still pull from current though
+			err = nil
+		} else {
+			return
+		}
+	}
+
+	if err = s.ReadLines(f.processLine); err != nil && os.IsNotExist(err) {
+		err = nil
+	}
+
+	return
+}
+
+func (m *MrT) processLine(buf *bytes.Buffer) (lineType byte, key, value []byte, err error) {
+	if lineType, err = buf.ReadByte(); err != nil {
+		// Error encountered getting line type
+		return
+	}
+
+	switch lineType {
+	case TransactionLine:
+		key, value = getKV(buf.Bytes())
+
+	case CommentLine, ReplayLine:
+		key, value = getKV(buf.Bytes())
+
+	case PutLine, DeleteLine:
+		key, value, err = getProcessedKV(buf, m.mw, m.cor)
+
+	default:
+		err = ErrInvalidLine
+	}
+
+	return
+}
+
+func (m *MrT) parseImportPayload(w *os.File, r io.Reader) (err error) {
+	var (
+		tmpF *os.File
+		tmpN string
+	)
+
+	if tmpF, tmpN, err = getTmp(); err != nil {
+		return
+	}
+	defer os.RemoveAll(tmpN)
+	defer tmpF.Close()
+
+	if _, err = io.Copy(tmpF, r); err != nil {
+		return
+	}
+
+	if _, err = tmpF.Seek(0, os.SEEK_SET); err != nil {
+		return
+	}
+
+	// Parse payload, check for proper token and signature
+	if _, _, err = shasher.ParseWithToken(m.getToken(), tmpF, w); err != nil {
+		return
+	}
+
+	_, err = w.Seek(0, os.SEEK_SET)
+	return
+}
+
+func (m *MrT) appendImportPayload(f *os.File) (err error) {
+	// Acquire an appender
+	a := m.f.Appender()
+	defer a.Close()
+	// Copy payload to appender
+	if _, err = io.Copy(a, f); err != nil {
+		return
+	}
+	// Reset position before being used again
+	_, err = f.Seek(0, os.SEEK_SET)
+	return
+}
+
+func (m *MrT) exportArchive(e *exporter) (err error) {
+	rdr := m.af.Reader()
+	defer rdr.Close()
+
+	err = e.exportFrom(rdr)
+	switch {
+	case err == ErrNoTxn:
+		err = ErrInvalidTxn
+	case os.IsNotExist(err):
+		err = nil
+	}
+
+	return
+}
+
 // Txn will create a transaction
 func (m *MrT) Txn(fn TxnFn) (err error) {
 	// Get a new appender
@@ -295,38 +414,6 @@ func (m *MrT) Comment(b []byte) (err error) {
 	})
 }
 
-// filter will iterate through filtered lines
-func (m *MrT) filter(txnID string, archive bool, fn FilterFn, filters []Filter) (err error) {
-	f := newFilter(fn, filters)
-	curR := m.f.Reader()
-	defer curR.Close()
-	s := seeker.New(curR)
-
-	journaler.Debug("Filter! %s %v", txnID, m.isInCurrent(txnID))
-
-	if archive && !m.isInCurrent(txnID) {
-		if err = m.readArchiveLines(f.processLine); err == nil {
-			if _, err = nextTxn(s); err == ErrNoTxn {
-				// We do not have any new transactions after our replay id, no need to read from current
-				return nil
-			} else if err != nil {
-				return
-			}
-		} else if os.IsNotExist(err) {
-			// No archive exists, we can still pull from current though
-			err = nil
-		} else {
-			return
-		}
-	}
-
-	if err = s.ReadLines(f.processLine); err != nil && os.IsNotExist(err) {
-		err = nil
-	}
-
-	return
-}
-
 // Filter will iterate through filtered lines
 func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter) (err error) {
 	if m.closed.Get() {
@@ -338,29 +425,6 @@ func (m *MrT) Filter(txnID string, archive bool, fn FilterFn, filters ...Filter)
 	}
 
 	return m.filter(txnID, archive, fn, filters)
-}
-
-func (m *MrT) processLine(buf *bytes.Buffer) (lineType byte, key, value []byte, err error) {
-	if lineType, err = buf.ReadByte(); err != nil {
-		// Error encountered getting line type
-		return
-	}
-
-	switch lineType {
-	case TransactionLine:
-		key, value = getKV(buf.Bytes())
-
-	case CommentLine, ReplayLine:
-		key, value = getKV(buf.Bytes())
-
-	case PutLine, DeleteLine:
-		key, value, err = getProcessedKV(buf, m.mw, m.cor)
-
-	default:
-		err = ErrInvalidLine
-	}
-
-	return
 }
 
 // ForEach will iterate through all the file lines starting from the provided transaction id
@@ -445,6 +509,7 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 
 		lastTxn := m.ltxn.Load()
 
+		f.Seek(0, os.SEEK_SET)
 		s := seeker.New(f)
 
 		// Get the first commit
@@ -466,8 +531,12 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 			return
 		}
 
+		if _, err = f.Seek(0, os.SEEK_SET); err != nil {
+			return
+		}
+
 		// TODO: CLEAN UP THIS LOCKCEPTION
-		return m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
+		if err = m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
 			txn := newTxn(buf, m.writeLine)
 			defer txn.clear()
 
@@ -483,9 +552,12 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 				return
 			}
 
-			journaler.Debug("About to sync: %s", buf.String())
 			return f.Sync()
-		})
+		}); err != nil {
+			return
+		}
+
+		return
 	}); err != nil {
 		return
 	}
@@ -497,52 +569,6 @@ func (m *MrT) Archive(populate TxnFn) (err error) {
 func (m *MrT) GetFromRaw(raw []byte) (key, value []byte, err error) {
 	buf := bytes.NewBuffer(raw)
 	return getProcessedKV(buf, m.mw, m.cor)
-}
-
-func getTmp() (tmpF *os.File, name string, err error) {
-	if tmpF, err = ioutil.TempFile("", "mrT"); err != nil {
-		return
-	}
-
-	var fi os.FileInfo
-	if fi, err = tmpF.Stat(); err != nil {
-		return
-	}
-
-	name = fi.Name()
-	return
-}
-
-func (m *MrT) parseImportPayload(w *os.File, r io.Reader) (err error) {
-	if _, err = io.Copy(w, r); err != nil {
-		return
-	}
-
-	var n int64
-	// Parse payload, check for proper token and signature
-	if _, n, err = shasher.ParseWithToken(m.getToken(), w, w); err != nil {
-		return
-	}
-
-	if err = w.Truncate(n); err != nil {
-		return
-	}
-
-	_, err = w.Seek(0, os.SEEK_SET)
-	return
-}
-
-func (m *MrT) appendImportPayload(f *os.File) (err error) {
-	// Acquire an appender
-	a := m.f.Appender()
-	defer a.Close()
-	// Copy payload to appender
-	if _, err = io.Copy(a, f); err != nil {
-		return
-	}
-	// Reset position before being used again
-	_, err = f.Seek(0, os.SEEK_SET)
-	return
 }
 
 // Import will import a reader
@@ -582,31 +608,6 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 
 		return fn(lineType, key, val)
 	})
-
-	return
-}
-
-func (m *MrT) getCurrentKey() string {
-	return path.Join(m.dir, m.name+".tdb")
-}
-
-func (m *MrT) getArchiveKey() string {
-	return path.Join(m.dir, "archive", m.name+".tdb")
-}
-
-func (m *MrT) exportArchive(e *exporter) (err error) {
-	var af *os.File
-	if af, err = os.Open(path.Join(m.dir, "archive", m.name+".tdb")); err != nil {
-		return
-	}
-
-	err = e.exportFrom(af)
-	switch {
-	case err == ErrNoTxn:
-		err = ErrInvalidTxn
-	case os.IsNotExist(err):
-		err = nil
-	}
 
 	return
 }
@@ -655,125 +656,4 @@ func (m *MrT) Close() (err error) {
 	errs.Push(m.f.Close())
 	errs.Push(m.af.Close())
 	return errs.Err()
-}
-
-// peekFirstTxn will return the first transaction id within the current file
-func peekFirstTxn(s *seeker.Seeker) (txnID string, err error) {
-	if err = s.SeekToStart(); err != nil {
-		return
-	}
-
-	return nextTxn(s)
-}
-
-func peekLastTxn(s *seeker.Seeker) (txnID string, err error) {
-	// Seek to the end of the file
-	if err = s.SeekToEnd(); err != nil {
-		return
-	}
-
-	return prevTxn(s)
-}
-
-func prevTxn(s *seeker.Seeker) (txnID string, err error) {
-	var lineType byte
-	for {
-		// Gets us to the beginning of the current line OR to the beginning of the previous line if
-		// we are already at the beginning of a line
-		if err = s.PrevLine(); err != nil {
-			return
-		}
-
-		if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
-			if lineType, err = buf.ReadByte(); err != nil {
-				return
-			}
-
-			if lineType == TransactionLine {
-				// Transaction found!
-				tidb, _ := getKV(buf.Bytes())
-				txnID = string(tidb)
-				return
-			}
-
-			return
-		}); err != nil {
-			return
-		}
-
-		if len(txnID) > 0 {
-			break
-		}
-
-		// Gets us to the beginning of the current line
-		if err = s.PrevLine(); err != nil {
-			return
-		}
-	}
-
-	return
-}
-
-func replayID(s *seeker.Seeker) (txnID string, err error) {
-	if err = s.SeekToStart(); err != nil {
-		return
-	}
-
-	if err = s.ReadLine(func(buf *bytes.Buffer) (err error) {
-		var lineType byte
-		if lineType, err = buf.ReadByte(); err != nil {
-			return
-		}
-
-		if lineType != ReplayLine {
-			return ErrNoTxn
-		}
-
-		tidb, _ := getKV(buf.Bytes())
-		txnID = string(tidb)
-		return
-	}); err != nil {
-		return
-	}
-
-	// Set cursor to the beginning of the transaction line
-	s.PrevLine()
-	return
-}
-
-// nextTxn will return the next transaction id within the current file
-func nextTxn(s *seeker.Seeker) (txnID string, err error) {
-	if err = s.ReadLines(func(buf *bytes.Buffer) (err error) {
-		var lineType byte
-		if lineType, err = buf.ReadByte(); err != nil {
-			return
-		}
-
-		if lineType != TransactionLine {
-			return
-		}
-
-		tidb, _ := getKV(buf.Bytes())
-		txnID = string(tidb)
-
-		return seeker.ErrEndEarly
-	}); err != nil {
-		return
-	}
-
-	if txnID == "" {
-		err = ErrNoTxn
-		return
-	}
-
-	// Set cursor to the beginning of the transaction line
-	s.PrevLine()
-	return
-}
-
-// ReadSeekCloser incorporates reader, seeker, and closer interfaces
-type ReadSeekCloser interface {
-	io.Reader
-	io.Seeker
-	io.Closer
 }

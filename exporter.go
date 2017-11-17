@@ -30,7 +30,11 @@ func (e *exporter) exportFrom(rsc ReadSeekCloser) (err error) {
 	s := seeker.New(rsc)
 
 	var ltid string
-	if ltid, err = peekLastTxn(s); err == nil && ltid == e.txnID {
+	if ltid, err = e.m.LastTxn(); err != nil {
+		return
+	}
+
+	if ltid == e.txnID {
 		return ErrNoTxn
 	}
 
@@ -56,7 +60,10 @@ func (e *exporter) exportFrom(rsc ReadSeekCloser) (err error) {
 func (e *exporter) seekToTransaction(s *seeker.Seeker) (err error) {
 	if e.mf.state != statePreMatch {
 		// We already matched our transaction, let's ensure we're pointing at the first transaction
-		_, err = nextTxn(s)
+		if _, err = nextTxn(s); err == ErrNoTxn && e.txnID == "" {
+			err = nil
+		}
+
 		return
 	}
 
