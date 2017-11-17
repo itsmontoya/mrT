@@ -646,14 +646,11 @@ func (m *MrT) Close() (err error) {
 		return errors.ErrIsClosed
 	}
 
-	// Acquire writers to ensure locks have completed
-	m.f.Writer().Close()
-	m.af.Writer().Close()
-
-	m.lbuf = nil
-	m.ug = nil
 	var errs errors.ErrorList
 	errs.Push(m.f.Close())
 	errs.Push(m.af.Close())
+
+	m.lbuf = nil
+	m.ug = nil
 	return errs.Err()
 }
