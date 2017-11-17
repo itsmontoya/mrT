@@ -493,75 +493,59 @@ func (m *MrT) LastTxn() (txnID string, err error) {
 
 // Archive will archive the current data
 func (m *MrT) Archive(populate TxnFn) (err error) {
-	if err = m.f.With(func(f *os.File) (err error) {
-		if m.closed.Get() {
-			return errors.ErrIsClosed
-		}
+	return m.f.With(func(f *os.File) (err error) {
+		return m.archive(f, populate)
+	})
+}
 
-		aw := m.af.Writer()
-		defer aw.Close()
-
-		// Ensure archive file is at the end
-		if _, err = aw.Seek(0, io.SeekEnd); err != nil {
-			return
-		}
-
-		lastTxn := m.ltxn.Load()
-
-		f.Seek(0, io.SeekStart)
-		s := seeker.New(f)
-
-		// Get the first commit
-		if err = s.ReadLines(getFirstCommit); err != nil {
-			return
-		}
-
-		// Move back a line so we can include the first commit
-		if err = s.PrevLine(); err != nil {
-			return
-		}
-
-		if _, err = io.Copy(aw, f); err != nil {
-			return
-		}
-
-		// AT END
-		if err = f.Truncate(0); err != nil {
-			return
-		}
-
-		if _, err = f.Seek(0, io.SeekStart); err != nil {
-			return
-		}
-
-		// TODO: CLEAN UP THIS LOCKCEPTION
-		if err = m.lbuf.Update(func(buf *bytes.Buffer) (err error) {
-			txn := newTxn(buf, m.writeLine)
-			defer txn.clear()
-
-			if err = txn.writeLine(buf, ReplayLine, []byte(lastTxn), nil); err != nil {
-				return
-			}
-
-			if err = populate(&txn); err != nil {
-				return
-			}
-
-			if _, err = f.Write(buf.Bytes()); err != nil {
-				return
-			}
-
-			return f.Sync()
-		}); err != nil {
-			return
-		}
-
+func (m *MrT) archive(f *os.File, populate TxnFn) (err error) {
+	if m.closed.Get() {
+		return errors.ErrIsClosed
+	}
+	// Acquire an archive writer
+	aw := m.af.Writer()
+	// Defer the closure of our archive writer
+	defer aw.Close()
+	// Ensure archive file is at the end
+	if _, err = aw.Seek(0, io.SeekEnd); err != nil {
 		return
-	}); err != nil {
+	}
+	// Seek to the first transaction within our file
+	// Note: Replay lines do not count as a transaction, this will move to the first txn AFTER the replay line (if it exists)
+	if err = seekFirstTxn(f); err != nil {
+		return
+	}
+	// Copy from file to archive writer
+	if _, err = io.Copy(aw, f); err != nil {
+		return
+	}
+	// Clear file
+	if err = clearFile(f); err != nil {
+		return
+	}
+	// Write replay line to file
+	return m.lbuf.Update(func(buf *bytes.Buffer) error {
+		return m.writeReplay(f, buf, populate)
+	})
+}
+
+func (m *MrT) writeReplay(f *os.File, buf *bytes.Buffer, populate TxnFn) (err error) {
+	txn := newTxn(buf, m.writeLine)
+	defer txn.clear()
+
+	if err = txn.writeLine(buf, ReplayLine, []byte(m.ltxn.Load()), nil); err != nil {
 		return
 	}
 
-	return
+	if err = populate(&txn); err != nil {
+		return
+	}
+
+	if _, err = f.Write(buf.Bytes()); err != nil {
+		return
+	}
+
+	return f.Sync()
 }
 
 // GetFromRaw will get a key and value line from a raw entry

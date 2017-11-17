@@ -48,7 +48,7 @@ type ActionInfo struct {
 	Value string `json:"value"`
 }
 
-func getFirstCommit(buf *bytes.Buffer) (err error) {
+func getFirstTxn(buf *bytes.Buffer) (err error) {
 	if buf.Bytes()[0] == TransactionLine {
 		return seeker.ErrEndEarly
 	}
@@ -131,6 +131,22 @@ func (l *lbuf) Update(fn func(*bytes.Buffer) error) (err error) {
 	})
 
 	return
+}
+
+func seekFirstTxn(f *os.File) (err error) {
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+
+	s := seeker.New(f)
+
+	// Get the first transaction
+	if err = s.ReadLines(getFirstTxn); err != nil {
+		return
+	}
+
+	// Move back a line so we can include the first transaction
+	return s.PrevLine()
 }
 
 // peekFirstTxn will return the first transaction id within the current file
@@ -253,6 +269,15 @@ func getTmp() (tmpF *os.File, name string, err error) {
 	}
 
 	name = tmpF.Name()
+	return
+}
+
+func clearFile(f *os.File) (err error) {
+	if err = f.Truncate(0); err != nil {
+		return
+	}
+
+	_, err = f.Seek(0, io.SeekStart)
 	return
 }
 
