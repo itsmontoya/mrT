@@ -7,7 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 
-	"github.com/Path94/atoms"
+	"github.com/PathDNA/atoms"
 	"github.com/itsmontoya/seeker"
 )
 

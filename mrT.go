@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/Path94/atoms"
+	"github.com/PathDNA/atoms"
 	"github.com/PathDNA/cfile"
 	"github.com/PathDNA/fileutils/shasher"
 
