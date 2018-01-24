@@ -354,8 +354,6 @@ func (m *MrT) exportArchive(e *exporter) (err error) {
 	return
 }
 
-
-
 func (m *MrT) archive(f *os.File, populate TxnFn) (err error) {
 	if m.closed.Get() {
 		return errors.ErrIsClosed
@@ -405,7 +403,6 @@ func (m *MrT) writeReplay(f *os.File, buf *bytes.Buffer, populate TxnFn) (err er
 
 	return f.Sync()
 }
-
 
 // Txn will create a transaction
 func (m *MrT) Txn(fn TxnFn) (err error) {
@@ -595,6 +592,7 @@ func (m *MrT) Import(r io.Reader, fn ForEachFn) (lastTxn string, err error) {
 		return fn(lineType, key, val)
 	})
 
+	m.ltxn.Store(lastTxn)
 	return
 }
 
