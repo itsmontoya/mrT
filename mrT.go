@@ -118,7 +118,7 @@ func (m *MrT) setMWs(mws []middleware.Middleware) {
 func (m *MrT) setLastTxn() (err error) {
 	// Set last transaction
 	return m.ForEach("", false, func(lt byte, key, val []byte) (err error) {
-		if lt != TransactionLine {
+		if lt != TransactionLine && lt != ReplayLine {
 			return
 		}
 
